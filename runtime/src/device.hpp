@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace autan::runtime {
@@ -22,11 +23,20 @@ class Gpu {
   [[nodiscard]] int index() const noexcept { return index_; }
   [[nodiscard]] void* stream() const noexcept { return stream_; }
   [[nodiscard]] const std::string& name() const noexcept { return name_; }
+  /// The device memory in use now beyond what was free once the stream
+  /// existed, by cudaMemGetInfo: on a device the process shares (unified
+  /// memory) this counts every process's allocations. Also updates peak().
+  std::int64_t sample();
+  /// The greatest sample() so far: a lower bound of the true peak, which may
+  /// fall between two samples.
+  [[nodiscard]] std::int64_t peak() const noexcept { return peak_; }
 
  private:
   int index_ = -1;
   void* stream_ = nullptr;
   std::string name_;
+  std::int64_t free_at_start_ = 0;
+  std::int64_t peak_ = 0;
 };
 
 }  // namespace autan::runtime

@@ -142,6 +142,17 @@ Json periodic_input(double tx, const std::function<void(Json&)>& edit = {}) {
   });
 }
 
+// The data of the run's `memory` event (#325); null without one.
+Json memory_event(const fs::path& run) {
+  std::ifstream in(run / "log.jsonl");
+  Json found = nullptr;
+  for (std::string line; std::getline(in, line);) {
+    const Json event = Json::parse(line);
+    if (event["message"] == "memory") found = event["data"];
+  }
+  return found;
+}
+
 std::vector<Json> history(const fs::path& run) {
   std::vector<Json> lines;
   std::ifstream in(run / "history.jsonl");
@@ -652,6 +663,13 @@ TEST_CASE("A CUDA run gives the physics its device and stream", "[runtime][gpu]"
   const auto on_cuda = [](Json& d) { d["devices"]["kind"] = "cuda"; };
   const Outcome o = run(periodic ? periodic_input(1.0, on_cuda) : input(on_cuda));
   REQUIRE(o.status == ExitStatus::finished);
+  // The device figures are sampled over the whole device, which other
+  // processes share (unified memory): only their shape is certain here.
+  const Json memory = memory_event(o.run);
+  const auto peak = memory["device_peak_bytes"].get<std::int64_t>();
+  CHECK(peak >= 0);
+  CHECK(memory["after_setup"]["device"].get<std::int64_t>() <= peak);
+  CHECK(memory["device_peak_bytes_by_rank"] == Json::array({peak}));
   std::ifstream log_in(o.run / "log.jsonl");
   Json ready, cuda;
   for (std::string line; std::getline(log_in, line);) {
@@ -1797,6 +1815,10 @@ TEST_CASE("Several ranks give the bits of one", "[runtime][mpi][gpu]") {
   const auto wall = wall_solution(one.run / "solution.cgns");
   CHECK(wall.contains("Pressure"));
   CHECK(wall_solution(many / "solution.cgns") == wall);
+  // The memory event names every rank's peaks.
+  const Json memory = memory_event(many);
+  CHECK(memory["host_peak_bytes_by_rank"].size() == static_cast<std::size_t>(ranks));
+  for (const auto& bytes : memory["host_peak_bytes_by_rank"]) CHECK(bytes.get<std::int64_t>() > 0);
   // Rank 0 logged the partition: every cell owned once.
   std::int64_t owned = 0;
   std::ifstream log_in(many / "log.jsonl");
@@ -1918,3 +1940,21 @@ TEST_CASE("Several ranks average and continue as one", "[runtime][mpi]") {
   }
 }
 #endif
+
+TEST_CASE("A run logs the memory it used", "[runtime]") {
+  // The physics holds 256 MiB of host memory from its construction on: the
+  // peak and the after-setup figures count it; a CPU run uses no device memory.
+  autan_test::RelaxationOptions holding;
+  holding.hold_bytes = std::int64_t{256} << 20;
+  const Outcome o = run(input(), holding);
+  REQUIRE(o.status == ExitStatus::finished);
+  const Json memory = memory_event(o.run);
+  REQUIRE(memory.is_object());
+  const auto host = memory["host_peak_bytes"].get<std::int64_t>();
+  CHECK(host >= holding.hold_bytes);
+  CHECK(memory["after_setup"]["host"].get<std::int64_t>() >= holding.hold_bytes);
+  CHECK(memory["after_setup"]["host"].get<std::int64_t>() <= host);
+  CHECK(memory["host_peak_bytes_by_rank"] == Json::array({host}));
+  CHECK(memory["device_peak_bytes"] == 0);
+  CHECK(memory["device_peak_bytes_by_rank"] == Json::array({0}));
+}

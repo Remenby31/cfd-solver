@@ -25,6 +25,7 @@
 
 #include <nlohmann/json.hpp>
 #include <picosha2.h>
+#include <sys/resource.h>
 
 #include "autan/core/error.hpp"
 #include "autan/core/geometry.hpp"
@@ -53,6 +54,22 @@ std::size_t at(index_t i) { return static_cast<std::size_t>(i); }
 
 // Set by SIGINT and SIGTERM; the loop finalises the run as stopped.
 volatile std::sig_atomic_t stop_requested = 0;
+
+// The process's resident memory at its peak so far, in bytes: VmHWM on Linux,
+// ru_maxrss elsewhere (bytes on macOS).
+std::int64_t host_peak_bytes() {
+#if defined(__linux__)
+  std::ifstream status("/proc/self/status");
+  for (std::string line; std::getline(status, line);) {
+    if (line.starts_with("VmHWM:")) return std::stoll(line.substr(6)) * 1024;  // kB
+  }
+  return 0;
+#else
+  rusage usage{};
+  getrusage(RUSAGE_SELF, &usage);
+  return static_cast<std::int64_t>(usage.ru_maxrss);
+#endif
+}
 extern "C" void request_stop(int /*signal*/) { stop_requested = 1; }
 
 class SignalGuard {
@@ -994,6 +1011,8 @@ class Run final : public Log {
     std::int64_t done = continued() ? p_.input.start->iterations : 0;
     try {
       physics_ = (*p_.factory)(context);
+      host_after_setup_ = host_peak_bytes();
+      if (gpu_) device_after_setup_ = gpu_->sample();
       set_floor();
       status = std::string(iterate(done));
     } catch (const std::exception& e) {
@@ -1287,6 +1306,7 @@ class Run final : public Log {
       const auto stepping = std::chrono::steady_clock::now();
       const double logged = log_seconds_;
       StepReport report = physics_->step(it);
+      if (gpu_) (void)gpu_->sample();
       solve_seconds_ += seconds_since(stepping) - (log_seconds_ - logged);
       report.diverged_cell = first_diverged(report.diverged_cell);
       if (report.residuals.size() != equations.size()) {
@@ -1524,6 +1544,41 @@ class Run final : public Log {
   // results.md, run.json `timing`: the process's wall-clock seconds and those
   // of the physics' steps and averaging (the slowest rank's), for this run's
   // iterations; null without any. Collective.
+  // The memory every rank used (#325): its host high-water mark and its
+  // device memory beyond what was free at its start, at their peak and once
+  // the physics was built, in bytes. Collective.
+  void log_memory() {
+    if (gpu_) (void)gpu_->sample();
+    const auto n = at(comm_.size());
+    const auto r = at(comm_.rank());
+    std::vector<ExactSum> slots(4 * n);
+    slots[4 * r].add(static_cast<double>(host_peak_bytes()));
+    slots[4 * r + 1].add(static_cast<double>(gpu_ ? gpu_->peak() : 0));
+    slots[4 * r + 2].add(static_cast<double>(host_after_setup_));
+    slots[4 * r + 3].add(static_cast<double>(device_after_setup_));
+    comm_.sum(slots);
+    Json host = Json::array(), device = Json::array();
+    std::int64_t host_setup = 0, device_setup = 0;
+    for (std::size_t k = 0; k < n; ++k) {
+      host.push_back(static_cast<std::int64_t>(slots[4 * k].value()));
+      device.push_back(static_cast<std::int64_t>(slots[4 * k + 1].value()));
+      host_setup = std::max(host_setup, static_cast<std::int64_t>(slots[4 * k + 2].value()));
+      device_setup = std::max(device_setup, static_cast<std::int64_t>(slots[4 * k + 3].value()));
+    }
+    const auto most = [](const Json& values) {
+      std::int64_t m = 0;
+      for (const auto& v : values) m = std::max(m, v.get<std::int64_t>());
+      return m;
+    };
+    note("info", "solver", "memory", "",
+         Json{{"host_peak_bytes", most(host)},
+              {"device_peak_bytes", most(device)},
+              {"host_peak_bytes_by_rank", host},
+              {"device_peak_bytes_by_rank", device},
+              {"after_setup", {{"host", host_setup}, {"device", device_setup}}}}
+             .dump());
+  }
+
   Json timing(std::int64_t done) {
     const double solve = -comm_.min(-solve_seconds_);
     const std::int64_t iterations = done - (continued() ? p_.input.start->iterations : 0);
@@ -1567,6 +1622,7 @@ class Run final : public Log {
     }
     // Only rank 0 writes the solution: its status is the run's.
     status = comm_.broadcast(status);
+    log_memory();
     // A failed run is not timed (results.md).
     info_["timing"] = status == "failed" ? Json(nullptr) : timing(done);
     if (status == "failed") info_["monitors"] = nullptr;
@@ -1603,6 +1659,8 @@ class Run final : public Log {
   Json info_;
   std::unique_ptr<RunDirectory> dir_;
   std::unique_ptr<Physics> physics_;
+  std::int64_t host_after_setup_ = 0;    // host_peak_bytes() once the physics exists
+  std::int64_t device_after_setup_ = 0;  // the device's sample() then
   bool stopped_by_signal_ = false;
   std::int64_t iteration_ = 0;
   std::vector<double> floor_;  // fp32+acc64 convergence floor per equation; empty: none  // the
