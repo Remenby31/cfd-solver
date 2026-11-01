@@ -501,3 +501,38 @@ test("a new case asks for what it lacks before showing errors", async ({ page })
   );
   await expect(page.getByTestId("plan-diagnostics")).not.toContainText("E0412");
 });
+
+test("zones take the colour of their condition in 3D", async ({ page }) => {
+  await page.goto(`/cases/new${WEBGL}`);
+  await page.getByLabel("Name").fill("box");
+  await page.getByLabel("Mesh", { exact: true }).selectOption("polyMesh");
+  await page.getByLabel("Turbulence").selectOption("sa");
+  await page.getByLabel("Mach").fill("0.3");
+  await page.getByLabel("Reynolds number", { exact: true }).fill("1000000");
+  await page.getByLabel("Reference length", { exact: true }).fill("1");
+  const view = page.getByTestId("mesh-view");
+  await expect(view).toHaveAttribute("data-ready", "true");
+  const box = await view.boundingBox();
+  if (!box) throw new Error("the mesh view has no box");
+  // The middle of the default view is zone ymin (SurfaceViewer frameAll), which the MeshInfo
+  // types as a wall: the plan gives it that condition before any rule.
+  const centre = {
+    x: box.x + box.width / 2 - 2,
+    y: box.y + box.height / 2 - 2,
+    width: 4,
+    height: 4,
+  };
+  // Which zone has which condition is said in words too: polyMesh types zmax as a symmetry.
+  await expect(page.getByLabel("symmetry: zmax")).toBeVisible();
+  await expect(page.getByLabel("wall: ymin")).toBeVisible();
+  await expect(page.getByTestId("condition-legend")).not.toContainText("slip");
+  const wall = await page.screenshot({ clip: centre });
+
+  await rule(page, 1, "ymin", "slip");
+  await expect(page.getByTestId("condition-legend")).toContainText("slip");
+  await expect.poll(async () => (await page.screenshot({ clip: centre })).equals(wall)).toBe(false);
+
+  await page.getByRole("button", { name: "Remove boundary rule 1" }).click();
+  await expect(page.getByTestId("condition-legend")).not.toContainText("slip");
+  await expect.poll(async () => (await page.screenshot({ clip: centre })).equals(wall)).toBe(true);
+});

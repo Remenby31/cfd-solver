@@ -3,18 +3,37 @@ import { fetchSurface, type Surface } from "../../api/surface";
 import { SurfaceViewer } from "../../viewer/SurfaceViewer";
 import { useResolvedTheme } from "../shell/theme";
 
+// The colour of each condition kind on the faces and in the legend. Walls are a neutral grey,
+// and no kind is blue, the colour of the selection.
+const CONDITION_COLOR: Record<string, string> = {
+  wall: "--series-8",
+  slip: "--series-6",
+  symmetry: "--series-3",
+  farfield: "--series-4",
+  inlet: "--series-2",
+  outlet: "--series-5",
+};
+
+/** The design token a condition kind is drawn in. */
+export function conditionColor(kind: string): string {
+  return Object.hasOwn(CONDITION_COLOR, kind) ? (CONDITION_COLOR[kind] as string) : "--series-7";
+}
+
 /** The boundary of a mesh in 3D, one zone per boundary zone; a click picks the zone under the
  * cursor. `selected` is a zone name, highlighted when the mesh has it. Without a surface file,
  * the mesh's boundary `zones` are listed to pick from instead. */
 export function MeshView({
   mesh,
   zones,
+  conditions,
   selected,
   onPick,
   webgl,
 }: {
   mesh: string;
   zones: string[];
+  /** The condition kind of each zone that has one; its faces take that kind's colour. */
+  conditions: Map<string, string>;
   selected: string | null;
   onPick: (zone: string) => void;
   webgl: boolean;
@@ -74,6 +93,17 @@ export function MeshView({
     return () => abort.abort();
   }, [mesh, ready]);
 
+  const conditionKey = JSON.stringify([...conditions]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: conditionKey stands for conditions
+  useEffect(() => {
+    viewer.current?.setZoneColors(
+      surface?.zones.map((z) => {
+        const kind = conditions.get(z.name);
+        return kind === undefined ? null : conditionColor(kind);
+      }) ?? [],
+    );
+  }, [surface, conditionKey]);
+
   useEffect(() => {
     const index = surface?.zones.findIndex((z) => z.name === selected) ?? -1;
     viewer.current?.setSelectedZone(index >= 0 ? index : null);
@@ -118,6 +148,9 @@ export function MeshView({
                   className="rounded-sm px-2 py-1 font-mono text-sm shadow-[0_0_0_1px_var(--line)] hover:bg-bg-2 focus-visible:shadow-[var(--focus-ring)] aria-pressed:bg-accent-soft aria-pressed:text-accent"
                 >
                   {zone}
+                  {conditions.has(zone) && (
+                    <span className="ml-2 font-sans text-fg-3">{conditions.get(zone)}</span>
+                  )}
                 </button>
               </li>
             ))}

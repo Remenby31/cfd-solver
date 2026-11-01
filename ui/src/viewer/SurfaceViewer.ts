@@ -12,6 +12,8 @@ const token = (name: string) =>
 interface ZoneMaterial {
   material: THREE.MeshStandardNodeMaterial;
   highlight: { value: number };
+  tint: { value: THREE.Color };
+  tinted: { value: number };
 }
 
 /** Renders one surface with a node field through a colormap; zones are pickable on the GPU. */
@@ -29,6 +31,7 @@ export class SurfaceViewer {
   private surface: Surface | null = null;
   private geometry: THREE.BufferGeometry | null = null;
   private zones: ZoneMaterial[] = [];
+  private zoneColors: (string | null)[] = [];
   private pickMaterials: THREE.MeshBasicNodeMaterial[] = [];
   private pickTarget = new THREE.RenderTarget(1, 1);
   private frame = 0;
@@ -110,16 +113,19 @@ export class SurfaceViewer {
       1,
     );
     const fieldColor = texture(this.lut, vec2(t, float(0.5))).rgb;
+    this.zoneColors = [];
     this.zones = surface.zones.map((zone, index) => {
       geometry.addGroup(zone.first_triangle * 3, zone.triangles * 3, index);
       const highlight = uniform(0);
+      const tint = uniform(new THREE.Color());
+      const tinted = uniform(0);
       const material = new THREE.MeshStandardNodeMaterial({
         flatShading: true,
         roughness: 0.65,
         side: THREE.DoubleSide,
       });
-      material.colorNode = mix(fieldColor, this.accent, highlight);
-      return { material, highlight };
+      material.colorNode = mix(mix(fieldColor, tint, tinted), this.accent, highlight);
+      return { material, highlight, tint, tinted };
     });
     this.pickMaterials = surface.zones.map((_, index) => {
       const id = index + 1;
@@ -146,6 +152,7 @@ export class SurfaceViewer {
   applyTheme(): void {
     this.scene.background = token("--bg-0");
     this.accent.value.copy(token("--accent"));
+    this.setZoneColors(this.zoneColors);
     this.requestRender();
   }
 
@@ -160,6 +167,19 @@ export class SurfaceViewer {
     this.range.span.value = range.max - range.min || 1;
     (this.lut.image.data as Uint8Array).set(sampleColormap(colormapFor(field.min, field.max)));
     this.lut.needsUpdate = true;
+    this.requestRender();
+  }
+
+  /** Paint zones in a flat colour, by index: a CSS colour or design token (`--series-1`), or
+   * null to show the field. */
+  setZoneColors(colors: (string | null)[]): void {
+    this.zoneColors = colors;
+    this.zones.forEach((zone, k) => {
+      const color = colors[k] ?? null;
+      zone.tinted.value = color === null ? 0 : 1;
+      if (color !== null)
+        zone.tint.value.copy(color.startsWith("--") ? token(color) : new THREE.Color(color));
+    });
     this.requestRender();
   }
 

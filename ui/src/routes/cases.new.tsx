@@ -21,7 +21,7 @@ import {
 import type { Diagnostic } from "../api/contracts";
 import { globEscape, globMatches } from "../api/glob";
 import { type Plan, runQuery } from "../api/runs";
-import { MeshView } from "../components/case/MeshView";
+import { conditionColor, MeshView } from "../components/case/MeshView";
 import { TopBar } from "../components/shell/TopBar";
 import { Button } from "../components/ui/Button";
 import { cn } from "../components/ui/cn";
@@ -205,6 +205,16 @@ function CaseEditor() {
         : shown?.plan?.ok
           ? "The plan is ready."
           : "";
+  // The condition the plan gives each zone (from a rule or from the mesh's type), once the plan
+  // is the form's own: a plan of the previous mesh or edit colours nothing.
+  const planned = shown?.ok && !rendered.isPlaceholderData && settled === form ? shown.plan : null;
+  const conditions = new Map(
+    (planned?.boundaries ?? []).flatMap((b) =>
+      b.condition ? [[b.zone, b.condition.kind] as const] : [],
+    ),
+  );
+  const byKind = new Map<string, string[]>();
+  for (const [zone, kind] of conditions) byKind.set(kind, [...(byKind.get(kind) ?? []), zone]);
   const set = <K extends keyof CaseForm>(key: K, value: CaseForm[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
   const setIn = <K extends "physics" | "freestream" | "time">(
@@ -639,10 +649,35 @@ function CaseEditor() {
             <MeshView
               mesh={form.mesh}
               zones={zones}
+              conditions={conditions}
               selected={picked}
               onPick={pick}
               webgl={webgl}
             />
+          )}
+          {form.mesh && byKind.size > 0 && (
+            <ul
+              className="m-0 flex list-none flex-wrap gap-x-4 gap-y-1 p-0 text-fg-2 text-sm"
+              data-testid="condition-legend"
+            >
+              {[...byKind].map(([kind, zoneNames]) => (
+                <li
+                  key={kind}
+                  className="inline-flex items-center gap-2"
+                  aria-label={`${kind}: ${zoneNames.join(", ")}`}
+                >
+                  <i
+                    aria-hidden
+                    className="inline-block size-2.5 rounded-sm"
+                    style={{ background: `var(${conditionColor(kind)})` }}
+                  />
+                  {kind}
+                  <span className="font-mono text-fg-3">
+                    {zoneNames.length <= 3 ? zoneNames.join(" ") : `${zoneNames.length} zones`}
+                  </span>
+                </li>
+              ))}
+            </ul>
           )}
           {stale.length > 0 && (
             <Note
