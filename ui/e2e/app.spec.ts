@@ -430,6 +430,17 @@ test("residuals at zero and far below 1 draw on the log chart", async ({ page })
   await expect(page.getByTestId("residual-chart").locator("canvas")).toBeVisible();
   await expect(page.getByTestId("iteration")).toHaveText(String(lines.at(-1).iteration));
   await expect(page.locator("[data-exempt]")).toHaveText(/momentum-y\s*exempt/);
+  // At the last iteration the cursor reads R/R₀, each residual over its first; the exempt
+  // equation is not drawn, so not read.
+  const plotArea = page.getByTestId("residual-chart").locator(".u-over");
+  const box = await plotArea.boundingBox();
+  if (!box) throw new Error("the residual chart has no plot area");
+  await page.mouse.move(box.x + box.width - 1, box.y + box.height / 2, { steps: 5 });
+  const last = lines.at(-1);
+  const ratio = (last.residuals.density / lines[0].residuals.density).toExponential(2);
+  await expect(page.getByTestId("residual-iteration")).toHaveText(`iteration ${last.iteration}`);
+  await expect(page.getByTestId("residual-density")).toHaveText(ratio);
+  await expect(page.getByTestId("residual-momentum-y")).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 

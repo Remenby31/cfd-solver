@@ -248,10 +248,11 @@ function RunView() {
 
             <TabPanel value="run" className="flex flex-col gap-6 outline-none">
               <section className="grid grid-cols-1 gap-6 rounded-lg border border-line bg-bg-0 p-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
-                <div className="h-72 min-w-0 rounded-md border border-line bg-bg-1 p-3">
+                <div className="h-96 min-w-0 rounded-md border border-line bg-bg-1 p-3">
                   <ResidualChart
                     history={history}
                     floors={run?.convergence?.floor}
+                    reference={run?.start?.residual_reference}
                     steady={time?.kind === "steady"}
                   />
                 </div>
