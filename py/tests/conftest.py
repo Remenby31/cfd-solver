@@ -20,13 +20,15 @@ HEAT_EXCHANGER = (EXAMPLES / "heat_exchanger.py").read_text()
 MESH_FILES = {"crm-hl.cgns": b"crm-hl fixture", "heat-exchanger.msh": b"heat-exchanger fixture"}
 
 
-def identity_of(run: dict[str, Any]) -> str:
-    """``identity`` as results.md#identity lists its fields, read from that page."""
+def identity_fields() -> list[str]:
     page = (ROOT / "docs" / "contracts" / "results.md").read_text()
     section = page.split("### Identity\n", 1)[1].split("\n## ", 1)[0]
-    fields = re.findall(r"^\d+\. `([a-z0-9_.]+)`$", section, flags=re.MULTILINE)
+    return re.findall(r"^\d+\. `([a-z0-9_.]+)`$", section, flags=re.MULTILINE)
+
+
+def identity_of(run: dict[str, Any]) -> str:
     parts = []
-    for path in fields:
+    for path in identity_fields():
         if path.startswith("start.") and run["start"] is None:
             continue
         value: Any = run

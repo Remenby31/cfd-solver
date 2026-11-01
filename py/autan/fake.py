@@ -33,9 +33,9 @@ from autan.results import (
     RunWriter,
     Solver,
     field_names,
-    identity,
     iso,
     residual_names,
+    run_identity,
     run_metadata,
     utc_now,
 )
@@ -243,14 +243,7 @@ class FakeBackend:
         devices = Devices(kind="cpu", count=1)
         info = RunInfo(
             run_id=RunWriter.new_run_id(started),
-            identity=identity(
-                spec.hash(),
-                mesh_info.source.sha256,
-                solver,
-                spec.physics.precision,
-                devices,
-                start.info if start is not None else None,
-            ),
+            identity="0" * 64,
             status="running",
             case=CaseIdentity(name=spec.name, sha256=spec.hash()),
             mesh=MeshIdentity(path=str(case.mesh_path), sha256=mesh_info.source.sha256),
@@ -265,6 +258,7 @@ class FakeBackend:
             start=start.info if start is not None else None,
             diagnostics=(),
         )
+        info = info.model_copy(update={"identity": run_identity(info)})
         manufactured = (
             case.resolve(spec.verification.manufactured.path).read_bytes()
             if spec.verification is not None

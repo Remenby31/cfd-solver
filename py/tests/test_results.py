@@ -24,8 +24,9 @@ import numpy as np
 import pytest
 from autan import cgns
 from autan.cli import json_schema, main
+from pydantic import ValidationError
 
-from tests.conftest import CRM_HL, EXAMPLES, FIXTURES, identity_of
+from tests.conftest import CRM_HL, EXAMPLES, FIXTURES, identity_fields, identity_of
 
 R_UNIVERSAL = 8.314462618
 CGNSCHECK = shutil.which("cgnscheck")
@@ -65,6 +66,13 @@ def test_run_directory_and_metadata_follow_the_contract(crm_run: autan.Results) 
     assert run["case"]["sha256"] == autan.load(path / "case.toml").spec.hash()
     assert run["mesh"]["path"] == str((EXAMPLES / "crm-hl.cgns").resolve())
     assert run["identity"] == identity_of(run)
+    assert tuple(identity_fields()) == autan.results.IDENTITY
+    assert autan.results.run_identity(run) == run["identity"]
+    # A count the schema allows as 1.0 is the integer 1; a list is no count.
+    as_float = run | {"devices": run["devices"] | {"count": 1.0}}
+    assert autan.results.run_identity(as_float) == run["identity"]
+    with pytest.raises(ValidationError):
+        autan.results.run_identity(run | {"devices": run["devices"] | {"count": [1]}})
     assert run["iterations"] == 100
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", run["finished"])
 

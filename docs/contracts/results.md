@@ -70,7 +70,7 @@ Two runs of the solver (not the `fake` backend) with the same `identity` whose c
 
 ### Identity
 
-`identity` is the SHA-256 of these `run.json` fields, in this order, each as text (an integer in decimal), joined by `\n`, UTF-8. The `start.` fields are present exactly for a run with a `start`. A field enters the identity only by a line of this list, which `py/tests` reads as the definition.
+`identity` is the SHA-256 of these `run.json` fields, in this order, each as text (an integer in decimal), joined by `\n`, UTF-8. The `start.` fields are present exactly for a run with a `start`. A field enters the identity only by a line of this list, which `py/tests` reads as the definition and `autan.results.IDENTITY` follows. `autan.results.run_identity(run)` computes it from a `RunInfo` or a `run.json` document: a writer records it, a reader compares it.
 
 1. `case.sha256`
 2. `mesh.sha256`
