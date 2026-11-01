@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from autan import gases, materials, units
 from autan.schema import CaseSpec, Compressible, Fluid, Freestream, Spec, Steady
-from autan.units import format_quantity
+from autan.units import format_quantity, format_unit
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -61,7 +61,11 @@ def _sorted_names(names: Iterable[str]) -> list[str]:
 
 
 def _statements(spec: CaseSpec, value: _Values) -> list[str]:
-    case = _Call("autan.Case", (value(spec.name), _Keyword("mesh", value(spec.mesh))))
+    given = [value(spec.name), _Keyword("mesh", value(spec.mesh))]
+    unit = CaseSpec.model_fields["mesh_unit"].get_default(call_default_factory=True)
+    if not _same(spec.mesh_unit, unit):
+        given.append(_Keyword("mesh_unit", value(spec.mesh_unit)))
+    case = _Call("autan.Case", tuple(given))
     out = [_statement("case", case), _statement("case.physics", value(spec.physics))]
     out.append(_statement("", _Call("case.freestream", value.keywords(_freestream(spec)))))
     if not _same(spec.time, Steady()):
@@ -83,8 +87,8 @@ def _statements(spec: CaseSpec, value: _Values) -> list[str]:
         method = f".{condition.kind.replace('-', '_')}"
         out.append(_statement("", _Call(method, value.keywords(condition), selector)))
     for monitor in spec.monitors:
-        given = value.keywords(monitor, skip=frozenset({"surfaces", "every"}))
-        forces = _Call("autan.forces", (value(monitor.surfaces), *given))
+        chosen = value.keywords(monitor, skip=frozenset({"surfaces", "every"}))
+        forces = _Call("autan.forces", (value(monitor.surfaces), *chosen))
         every = (_Keyword("every", value(monitor.every)),) if monitor.every != 1 else ()
         out.append(_statement("", _Call("case.monitor", (forces, *every))))
     return out
@@ -106,6 +110,8 @@ def _document(value: Any) -> Any:
         return (type(value), value.model_dump(mode="json", by_alias=True))
     if isinstance(value, pint.Quantity):
         return format_quantity(value)
+    if isinstance(value, pint.Unit):
+        return format_unit(value)
     if isinstance(value, tuple | list):
         return [_document(item) for item in value]
     if isinstance(value, float):
@@ -122,6 +128,8 @@ class _Values:
     def __call__(self, value: Any) -> _Expr:
         if isinstance(value, pint.Quantity):
             return self.quantity(value)
+        if isinstance(value, pint.Unit):
+            return _string(format_unit(value))
         if isinstance(value, float):
             return _number(value)
         if isinstance(value, bool | int) or value is None:

@@ -101,6 +101,79 @@ class Dimension:
         return quantity
 
 
+class UnitOfLength:
+    """Field marker: a unit of length, ``"m"``, ``"mm"``, ``"in"``, or a Pint unit; held as the
+    unit its short text reads back."""
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: type[Any], handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        return core_schema.no_info_plain_validator_function(
+            cls.validate,
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                format_unit, when_used="json"
+            ),
+        )
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return {
+            "type": "string",
+            "minLength": 1,
+            "description": "Unit of length, as Pint writes it.",
+            "x-autan-dimension": "[length]",
+        }
+
+    @staticmethod
+    def validate(value: object) -> pint.Unit:
+        if isinstance(value, pint.Unit):
+            if value._REGISTRY is not ureg:
+                fail("E0303", "{got} comes from another unit registry", got=repr(str(value)))
+            text = format_unit(value)
+        elif isinstance(value, str):
+            text = value
+        else:
+            fail("E0301", "expected a unit of length, got {got}", got=repr(value))
+        try:
+            unit = ureg.parse_units(text)
+        except Exception as error:  # noqa: BLE001 -- Pint's parser raises many unrelated types
+            fail(
+                "E0303",
+                "cannot read the unit {got}: {reason}",
+                got=repr(text),
+                reason=f"{type(error).__name__}: {error}",
+            )
+        canonical = ureg.parse_units(format_unit(unit))
+        for candidate in (unit, canonical):
+            if not ureg.Quantity(1.0, candidate).check("[length]"):
+                fail("E0301", "expected a unit of length, got {got}", got=repr(text))
+            try:
+                one, two = (
+                    ureg.Quantity(x, candidate).to(ureg.meter).magnitude for x in (1.0, 2.0)
+                )
+            except (pint.PintError, ArithmeticError):
+                one = two = math.nan
+            # A mesh scale: a finite, positive, proportional factor to metres (not dB, not
+            # an exponent that overflows), the same after the text reads back.
+            if not (math.isfinite(one) and one > 0 and math.isclose(two, 2 * one)):
+                fail("E0301", "{got} has no finite factor to metres", got=repr(text))
+        return canonical
+
+
+def metres_per(unit: pint.Unit) -> float:
+    """Metres in one ``unit`` of length, to 15 significant digits: Pint's chained factors
+    can miss an exact decimal definition by an ulp (``ft``: 0.30479999999999996)."""
+    return float(f"{ureg.Quantity(1.0, unit).to(ureg.meter).magnitude:.15g}")
+
+
+def format_unit(unit: pint.Unit) -> str:
+    """Canonical text of a unit: Pint's short form."""
+    return f"{unit:~D}"
+
+
 def _to_quantity(value: object, dimension: str) -> pint.Quantity:
     if isinstance(value, pint.Quantity):
         if value._REGISTRY is not ureg:

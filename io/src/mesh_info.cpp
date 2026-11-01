@@ -210,6 +210,9 @@ std::string mesh_info_json(const Mesh& mesh, const std::string& sha256) {
   }
 
   const double max_angle = *std::ranges::max_element(quality.non_orthogonality);
+  const auto [x_low, x_high] = std::ranges::minmax(mesh.x());
+  const auto [y_low, y_high] = std::ranges::minmax(mesh.y());
+  const auto [z_low, z_high] = std::ranges::minmax(mesh.z());
   const Json doc{
       {"schema", "autan.mesh-info/1"},
       {"source",
@@ -224,6 +227,7 @@ std::string mesh_info_json(const Mesh& mesh, const std::string& sha256) {
           {"prism", by_shape[2]},
           {"hexa", by_shape[3]},
           {"polyhedron", by_shape[4]}}}}},
+      {"bounds", {{"min", {x_low, y_low, z_low}}, {"max", {x_high, y_high, z_high}}}},
       {"boundary_zones", boundary},
       {"cell_zones", cell_zones},
       {"interfaces", interfaces},

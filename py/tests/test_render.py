@@ -258,8 +258,12 @@ NAMES = {
 }
 
 
+MESH_UNITS = {"mesh-in-inches": "in", "mesh-in-micrometres": "um"}
+
+
 def edge_case(edge: str) -> autan.Case:
-    case = autan.Case(NAMES.get(edge, "edge"), mesh="crm-hl.cgns")
+    unit = MESH_UNITS.get(edge, "m")
+    case = autan.Case(NAMES.get(edge, "edge"), mesh="crm-hl.cgns", mesh_unit=unit)
     case.physics = autan.Compressible(turbulence=autan.SA())
     case.freestream(mach=0.2, pressure=Q(101325, "Pa"))
     if edge in EDGES:
@@ -267,7 +271,7 @@ def edge_case(edge: str) -> autan.Case:
     return case
 
 
-@pytest.mark.parametrize("edge", sorted(EDGES) + sorted(NAMES))
+@pytest.mark.parametrize("edge", sorted(EDGES) + sorted(NAMES) + sorted(MESH_UNITS))
 def test_rendering_keeps_the_document(edge: str, write_case: Callable[..., Path]) -> None:
     case = edge_case(edge)
     source = case.to_python()
@@ -278,7 +282,7 @@ def test_rendering_keeps_the_document(edge: str, write_case: Callable[..., Path]
 
 
 def test_rendered_code_type_checks_against_the_builders(tmp_path: Path) -> None:
-    for edge in sorted(EDGES) + sorted(NAMES):
+    for edge in sorted(EDGES) + sorted(NAMES) + sorted(MESH_UNITS):
         (tmp_path / f"{edge.replace('-', '_')}.py").write_text(edge_case(edge).to_python())
     config = Path(__file__).parents[2] / "pyproject.toml"
     checked = subprocess.run(

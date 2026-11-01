@@ -77,6 +77,9 @@ TEST_CASE("MeshInfo of the hybrid test mesh has its constructed counts", "[mesh-
   CHECK(types["prism"] == 64);
   CHECK(types["hexa"] == 8);
   CHECK(types["polyhedron"] == 0);
+  // The unit cube of generate.py, in the file's units.
+  CHECK(doc["bounds"]["min"] == nlohmann::json::array({0.0, 0.0, 0.0}));
+  CHECK(doc["bounds"]["max"] == nlohmann::json::array({1.0, 1.0, 1.0}));
   REQUIRE(doc["boundary_zones"].size() == 6);
   CHECK(doc["boundary_zones"][0]["name"] == "xmin");
   CHECK(doc["boundary_zones"][0]["faces"] == 24);

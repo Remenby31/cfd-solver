@@ -22,6 +22,7 @@ case.monitor(autan.forces("wing.*", ref_area=191.84 * m**2), every=10)
 schema = "autan.case/1"
 name = "crm-hl"
 mesh = "crm-hl.cgns"
+mesh_unit = "m"
 
 [physics]
 kind = "compressible"
@@ -76,6 +77,7 @@ Every table rejects unknown keys. Discriminated unions are tagged by `kind` (or 
 | `schema` | `"autan.case/1"` | required (`E0004` otherwise) |
 | `name` | non-empty string | required |
 | `mesh` | path, relative to the case file | required |
+| `mesh_unit` | unit of length of the mesh file's coordinates, as Pint writes it (`"m"`, `"mm"`, `"in"`); never read from the file. Only the mesh's coordinates, and what MeshInfo reports from the file (`periodic[].transform`), are in this unit; every other length of the case carries its own. `E0301` for a unit of another dimension, `E0303` for text that is not a unit | `"m"` |
 | `physics` | [Physics](#physics) | required |
 | `freestream` | [Freestream](#freestream) | required |
 | `time` | [Time](#time) | `{kind = "steady"}` |

@@ -17,6 +17,7 @@ from pathlib import Path
 import autan
 import autan.initial_state
 import autan.solver_backend
+import numpy as np
 import pytest
 from autan import cgns
 from autan.cli import main
@@ -308,8 +309,11 @@ def test_continue_through_the_runtime_matches_the_uninterrupted_run(
 PERIODIC_BOX = ROOT / "tests" / "data" / "mesh" / "periodic-box" / "periodic-box.binary.msh"
 
 
-def _box(tmp_path: Path, turbulence: str) -> tuple[autan.Case, autan.MeshInfo]:
+def _box(
+    tmp_path: Path, turbulence: str, mesh_unit: str = "m"
+) -> tuple[autan.Case, autan.MeshInfo]:
     assert MESH_INFO is not None
+    tmp_path.mkdir(parents=True, exist_ok=True)
     info = tmp_path / "box.meshinfo.json"
     info.write_text(
         subprocess.run(
@@ -322,7 +326,7 @@ def _box(tmp_path: Path, turbulence: str) -> tuple[autan.Case, autan.MeshInfo]:
     case = tmp_path / "box.py"
     case.write_text(
         "import autan\nfrom autan.units import K, Pa\n"
-        f"case = autan.Case('box', mesh={str(PERIODIC_BOX)!r})\n"
+        f"case = autan.Case('box', mesh={str(PERIODIC_BOX)!r}, mesh_unit={mesh_unit!r})\n"
         f"case.physics = autan.Compressible(turbulence=autan.{turbulence}())\n"
         "case.freestream(mach=0.2, pressure=101325 * Pa, temperature=300 * K)\n"
         "case.boundary('z*').slip()\n"
@@ -331,26 +335,34 @@ def _box(tmp_path: Path, turbulence: str) -> tuple[autan.Case, autan.MeshInfo]:
     return autan.load(case), autan.MeshInfo.load(info)
 
 
+# results.md#solutioncgns: coordinates and translations are the file's times mesh.scale, the
+# metres in one mesh_unit (0.0254 for the inch, exactly): the run in metres gives the file's.
 def test_a_periodic_run_reads_back_through_the_results_contract(tmp_path: Path) -> None:
-    case, mesh = _box(tmp_path, "Laminar")
-    result = case.run(
-        mesh, backend=autan.SolverBackend(executable=RELAXATION), runs=tmp_path / "runs"
-    )
-    assert result.run.status == "converged"
-    assert result.field("Density").size == mesh.counts.cells  # checks solution.cgns
-    zone = cgns.read(result.path / "solution.cgns").child("Base").child("Zone")
-    connectivity = zone.child("ZoneGridConnectivity")
-    assert {"xmin", "xmax", "ymin", "ymax"} == set(connectivity.children)
-    for pair in mesh.periodic:
-        a, b = pair.zones
-        vector = list(pair.transform.vector)
-        side_a, side_b = connectivity.child(a), connectivity.child(b)
-        assert json.loads(side_a.child("PeriodicTranslation").text()) == vector
-        assert json.loads(side_b.child("PeriodicTranslation").text()) == [-v for v in vector]
-        assert side_a.child("PointList").data.size == pair.faces
-    # The monitor integrates over the slip walls only, every 7 iterations.
-    iterations = result.history.monitor("forces")["iteration"].tolist()
-    assert iterations == list(range(7, result.run.iterations + 1, 7))
+    coordinates = {}
+    for unit, scale in (("m", 1.0), ("in", 0.0254)):
+        case, mesh = _box(tmp_path / unit, "Laminar", unit)
+        result = case.run(
+            mesh, backend=autan.SolverBackend(executable=RELAXATION), runs=tmp_path / unit / "runs"
+        )
+        assert result.run.status == "converged"
+        assert result.field("Density").size == mesh.counts.cells  # checks solution.cgns
+        zone = cgns.read(result.path / "solution.cgns").child("Base").child("Zone")
+        coordinates[unit] = np.stack(
+            [zone.child("GridCoordinates").child(f"Coordinate{a}").data for a in "XYZ"]
+        )
+        connectivity = zone.child("ZoneGridConnectivity")
+        assert {"xmin", "xmax", "ymin", "ymax"} == set(connectivity.children)
+        for pair in mesh.periodic:
+            a, b = pair.zones
+            vector = [v * scale for v in pair.transform.vector]
+            side_a, side_b = connectivity.child(a), connectivity.child(b)
+            assert json.loads(side_a.child("PeriodicTranslation").text()) == vector
+            assert json.loads(side_b.child("PeriodicTranslation").text()) == [-v for v in vector]
+            assert side_a.child("PointList").data.size == pair.faces
+        # The monitor integrates over the slip walls only, every 7 iterations.
+        iterations = result.history.monitor("forces")["iteration"].tolist()
+        assert iterations == list(range(7, result.run.iterations + 1, 7))
+    assert np.array_equal(coordinates["in"], coordinates["m"] * 0.0254)
 
 
 def test_euler_refuses_the_multigrid_on_a_periodic_mesh(tmp_path: Path) -> None:

@@ -125,7 +125,7 @@ CGNS/HDF5, written against the CGNS SIDS 4.x and readable by the CGNS library (`
     FamilyBC             FamilyBC_t      boundary zones with a condition: BCType of that condition
   Zone                   Zone_t          Unstructured; [nodes, cells, 0]
     ZoneType                             Unstructured
-    GridCoordinates                      CoordinateX, CoordinateY, CoordinateZ (R8)
+    GridCoordinates                      CoordinateX, CoordinateY, CoordinateZ (R8, m: the mesh's times mesh.scale)
     NGonElements         Elements_t      NGON_n, ElementRange [1, F], ElementStartOffset, ElementConnectivity (I8)
     NFaceElements        Elements_t      NFACE_n, ElementRange [F+1, F+C], ElementStartOffset, ElementConnectivity (I8, signed face ids)
     ZoneBC               ZoneBC_t        absent when every boundary zone with faces is periodic
@@ -145,7 +145,7 @@ Node names. A zone keeps its name as node name when it has 1 to 32 printable ASC
 
 BCType of each resolved condition: adiabatic `wall` → `BCWallViscousHeatFlux` (zero heat flux), isothermal `wall` → `BCWallViscousIsothermal`; `slip` → `BCWallInviscid`; `symmetry` → `BCSymmetryPlane`; `farfield` → `BCFarfield`; `inlet` and `velocity-inlet` → `BCInflowSubsonic`; `outlet` → `BCOutflowSubsonic`; `manufactured` (verification cases) → `UserDefined`; `oracle-state` → `BCDirichlet`. The node values are the SIDS strings (`BCTypeName` in the CGNS library), not the C enumerator names.
 
-Periodic pairs ([mesh-info.md](mesh-info.md), `periodic`). Each pair `[a, b]` is two reciprocal `GridConnectivity_t` of `Zone` with itself, named after the node of each side's zone; the zones of a pair have no `BC_t`, and their `Family_t` no `FamilyBC`. The side-a connection has, as `PointList`, the faces of zone a in mesh order and, as `PointListDonor`, the face of zone b each one maps to. The side-b connection holds the same correspondence the other way round, in any order. Its `GridConnectivityProperty/Periodic` (`Periodic_t`) has `RotationCenter` and `RotationAngle` zero and `Translation` in R4, as CGNS requires; the descriptor `PeriodicTranslation` holds the translation `[x, y, z]` exactly, as JSON doubles, and is the authority: `transform.vector` of the pair for side a, its opposite for side b, with `Translation` its rounding to R4. No face is both in a connection and in a `BC_t`.
+Periodic pairs ([mesh-info.md](mesh-info.md), `periodic`). Each pair `[a, b]` is two reciprocal `GridConnectivity_t` of `Zone` with itself, named after the node of each side's zone; the zones of a pair have no `BC_t`, and their `Family_t` no `FamilyBC`. The side-a connection has, as `PointList`, the faces of zone a in mesh order and, as `PointListDonor`, the face of zone b each one maps to. The side-b connection holds the same correspondence the other way round, in any order. Its `GridConnectivityProperty/Periodic` (`Periodic_t`) has `RotationCenter` and `RotationAngle` zero and `Translation` in R4, as CGNS requires; the descriptor `PeriodicTranslation` holds the translation `[x, y, z]` exactly, as JSON doubles, and is the authority: `transform.vector` of the pair times `mesh.scale` (m) for side a, its opposite for side b, with `Translation` its rounding to R4. No face is both in a connection and in a `BC_t`.
 
 `FlowSolution` fields (SIDS names):
 

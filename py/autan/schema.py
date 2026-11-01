@@ -12,7 +12,7 @@ import rfc8785
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
 
 from autan.errors import CaseError, Diagnostic, Location, diagnostic
-from autan.units import K, deg, fail, m, quantity, si, validate_number
+from autan.units import K, UnitOfLength, deg, fail, m, quantity, si, validate_number
 
 SCHEMA_ID = "autan.case/1"
 # Largest integer RFC 8785 canonicalizes exactly (IEEE 754 double, 2**53 - 1).
@@ -442,6 +442,7 @@ class CaseSpec(Spec):
     schema_: Literal["autan.case/1"] = Field(default="autan.case/1", alias="schema")
     name: Name
     mesh: Name
+    mesh_unit: Annotated[pint.Unit, UnitOfLength] = Field(default_factory=lambda: m)
     physics: Physics
     freestream: Freestream
     time: Time = Field(default_factory=Steady)

@@ -8,9 +8,11 @@ import tomllib
 import traceback
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
+import pint
 import tomli_w
+from pydantic import TypeAdapter, ValidationError
 
 from autan.errors import CaseError, Location, diagnostic
 from autan.plan import Plan, plan
@@ -44,12 +46,12 @@ from autan.schema import (
     Verification,
     Wall,
     _caller_location,
+    diagnostics_from,
 )
+from autan.units import UnitOfLength
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-
-    import pint
 
     from autan.fake import FakeBackend
 
@@ -59,21 +61,30 @@ if TYPE_CHECKING:
     from autan.results import Results
     from autan.solver_backend import SolverBackend
 
+_MESH_UNIT = TypeAdapter(Annotated[pint.Unit, UnitOfLength])
 _collectors: list[list[Case]] = []
 
 
 class Case:
     """A case under construction: ``autan.Case("crm-hl", mesh="crm-hl.cgns")``.
 
+    ``mesh_unit`` is the length unit of the mesh file's coordinates (``"in"``, ``"mm"``, or
+    a Pint unit; default ``"m"``); every other length of the case carries its own unit.
+
     Builder methods validate their arguments immediately and raise ``autan.CaseError``
     with a coded diagnostic that points at the calling line. ``spec`` returns the
     complete, validated document (``autan.case/1``).
     """
 
-    def __init__(self, name: str, mesh: str | Path) -> None:
+    def __init__(self, name: str, mesh: str | Path, *, mesh_unit: str | pint.Unit = "m") -> None:
         self._origin = _caller_location()
         self._name = name
         self._mesh = str(mesh)
+        try:
+            self._mesh_unit = _MESH_UNIT.validate_python(mesh_unit)
+        except ValidationError as error:
+            located = self._origin.model_copy(update={"path": "mesh_unit"})
+            raise CaseError(diagnostics_from(error, located, {})) from None
         self._physics: Compressible | Incompressible | None = None
         self._freestream: Freestream | None = None
         self._time: Steady | Unsteady = Steady()
@@ -264,6 +275,7 @@ class Case:
             return CaseSpec(
                 name=self._name,
                 mesh=self._mesh,
+                mesh_unit=self._mesh_unit,
                 physics=self._physics,
                 freestream=self._freestream,
                 time=self._time,
@@ -297,7 +309,7 @@ class Case:
         """A case holding ``spec``; diagnostics point at ``file`` and document paths."""
         case = cls.__new__(cls)
         case._origin = Location(file=file)
-        case._name, case._mesh = spec.name, spec.mesh
+        case._name, case._mesh, case._mesh_unit = spec.name, spec.mesh, spec.mesh_unit
         case._physics, case._freestream, case._time = spec.physics, spec.freestream, spec.time
         case._boundaries = list(spec.boundaries)
         case._cell_zones = list(spec.cell_zones)

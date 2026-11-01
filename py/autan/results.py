@@ -19,6 +19,7 @@ from autan import cgns
 from autan.errors import CaseError, Diagnostic, Location, diagnostic
 from autan.meshinfo import MeshInfo
 from autan.schema import DDES, SA, SST, CaseSpec, Compressible, Steady
+from autan.units import metres_per
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -985,7 +986,8 @@ def _solution_problems(
     used = np.abs(np.asarray(nface.child("ElementConnectivity").data)).ravel()
     counts = np.bincount(used, minlength=faces + 1)
     exterior = set(np.flatnonzero(counts == 1).tolist())
-    found += _periodic_problems(zone, mesh_info, nodes_of, exterior, bc_faces)
+    scale = metres_per(case.mesh_unit)
+    found += _periodic_problems(zone, mesh_info, scale, nodes_of, exterior, bc_faces)
     for region in zone.with_label("ZoneSubRegion_t"):
         low, high = (1, faces) if region.name == "WallSolution" else (faces + 1, faces + cells)
         if not _ids_in(region.child("PointList").data, low, high):
@@ -1013,6 +1015,7 @@ def _exact(text: str) -> list[float] | None:
 def _periodic_problems(
     zone: cgns.Node,
     mesh_info: MeshInfo,
+    scale: float,
     nodes_of: dict[str, str],
     exterior: set[int],
     bc_faces: set[int],
@@ -1031,7 +1034,7 @@ def _periodic_problems(
     claimed: set[int] = set()
     for pair in mesh_info.periodic:
         a, b = pair.zones
-        vector = np.array(pair.transform.vector)
+        vector = np.array(pair.transform.vector) * scale
         matches = {}
         for side, shift in ((a, vector), (b, -vector)):
             gc = connectivity.child(nodes_of[side])

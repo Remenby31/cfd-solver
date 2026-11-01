@@ -240,4 +240,10 @@ std::vector<std::vector<index_t>> match_periodic_faces(const Mesh& mesh,
 /// Throws autan::Error with an E01xx code on the first invariant violation.
 Mesh assemble(MeshInput input, AssemblyMap* map = nullptr);
 
+/// `mesh` with every point coordinate, periodic translation and ghost
+/// translation multiplied by `scale` (a mesh in other length units brought to
+/// metres), its faces, cells and zones unchanged. Throws E0102 for a scale
+/// that is not finite and positive.
+Mesh scaled(const Mesh& mesh, double scale);
+
 }  // namespace autan

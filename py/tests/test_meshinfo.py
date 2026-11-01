@@ -38,6 +38,9 @@ def _zones(d: dict[str, Any]) -> list[dict[str, Any]]:
         lambda d: d["interfaces"].append({"zones": ["fluid", "fluid"], "faces": 1}),
         lambda d: d["quality"].update(max_non_orthogonality_deg=181.0),
         lambda d: d.pop("quality"),
+        lambda d: d.pop("bounds"),
+        lambda d: d["bounds"]["min"].__setitem__(0, 1e3),  # min above max
+        lambda d: d["bounds"]["max"].pop(),
     ],
 )
 def test_invalid_documents_are_rejected_with_e0202(

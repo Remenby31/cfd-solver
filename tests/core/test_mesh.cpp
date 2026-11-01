@@ -9,12 +9,15 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "autan/core/error.hpp"
 #include "autan/core/geometry.hpp"
 #include "autan/core/mesh.hpp"
 #include "autan/core/renumber.hpp"
 #include "fixtures.hpp"
+
+using Catch::Matchers::WithinRel;
 
 using autan::index_t;
 using autan::offset_t;
@@ -479,4 +482,37 @@ TEST_CASE("Faces of owned cells come first, then the halo faces of ghost cells",
   // Renumbering keeps each ghost's translation with it.
   const autan::Mesh same = autan::renumber_cells(mesh, std::array<index_t, 2>{0, 1});
   CHECK(same.ghost_translation()[0] == std::array<double, 3>{1.0, 0.0, 0.0});
+}
+
+TEST_CASE("A scaled mesh keeps its topology, scales lengths and periodic translations", "[mesh]") {
+  autan::CellwiseMesh cells = autan::test::box(3, autan::test::BoxFill::hybrid, 0.2);
+  cells.face_zones[0].kind = autan::BcKind::periodic;
+  cells.face_zones[1].kind = autan::BcKind::periodic;
+  cells.periodic.push_back({.zone_a = 0, .zone_b = 1, .translation = {1.0, 0.0, 0.0}});
+  const autan::Mesh mesh = autan::assemble(autan::to_face_based(std::move(cells)));
+  const double scale = 0.0254;
+  const autan::Mesh s = autan::scaled(mesh, scale);
+  REQUIRE(s.n_points() == mesh.n_points());
+  for (std::size_t i = 0; i < static_cast<std::size_t>(mesh.n_points()); ++i) {
+    CHECK(s.x()[i] == mesh.x()[i] * scale);
+    CHECK(s.z()[i] == mesh.z()[i] * scale);
+  }
+  CHECK(std::ranges::equal(s.face_nodes(), mesh.face_nodes()));
+  CHECK(std::ranges::equal(s.owner(), mesh.owner()));
+  CHECK(std::ranges::equal(s.neighbour(), mesh.neighbour()));
+  CHECK(std::ranges::equal(s.cell_global_id(), mesh.cell_global_id()));
+  REQUIRE(s.periodic_pairs().size() == 1);
+  CHECK(s.periodic_pairs()[0].translation[0] == scale);
+  const autan::Geometry g0 = autan::compute_geometry(mesh), g1 = autan::compute_geometry(s);
+  for (std::size_t c = 0; c < g0.cell_volume.size(); ++c)
+    CHECK_THAT(g1.cell_volume[c], WithinRel(g0.cell_volume[c] * scale * scale * scale, 1e-13));
+  for (const double bad : {0.0, -1.0, std::numeric_limits<double>::infinity()}) {
+    CAPTURE(bad);
+    try {
+      (void)autan::scaled(mesh, bad);
+      FAIL("expected E0102");
+    } catch (const autan::Error& e) {
+      CHECK(e.code() == autan::ErrorCode::mesh_index_out_of_range);
+    }
+  }
 }

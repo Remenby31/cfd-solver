@@ -128,6 +128,7 @@ struct Prepared {
   SolverInput input;
   Mesh mesh;
   std::string mesh_hash;
+  std::string mesh_info;                     // MeshInfo of the mesh as read, before mesh.scale
   std::map<std::string, index_t> face_zone;  // boundary zone name -> Mesh::face_zones() index
   std::vector<std::vector<index_t>> monitor_zones;
   const PhysicsFactory* factory = nullptr;
@@ -638,6 +639,7 @@ Prepared prepare(const fs::path& input_file, const PhysicsRegistry& registry, in
   Prepared p{.input = parse_solver_input(read_text(input_file)),
              .mesh = {},
              .mesh_hash = {},
+             .mesh_info = {},
              .face_zone = {},
              .monitor_zones = {},
              .factory = nullptr,
@@ -669,6 +671,10 @@ Prepared prepare(const fs::path& input_file, const PhysicsRegistry& registry, in
     invalid("devices.count", "is " + std::to_string(p.input.device_count) + ", but " +
                                  std::to_string(ranks) + " ranks run the case");
   }
+  // solver-input.md, mesh.scale: the coordinates and periodic translations in
+  // metres once checked against the file, before any geometry or pairing.
+  p.mesh_info = io::mesh_info_json(p.mesh, p.mesh_hash);
+  if (p.input.mesh_scale != 1.0) p.mesh = scaled(p.mesh, p.input.mesh_scale);
   if (p.input.start) load_start(p);
   if (p.input.verification) {
     // The manufactured solution is checked like the mesh: by its hash.
@@ -933,7 +939,7 @@ class Run final : public Log {
       try {
         dir_ = std::make_unique<RunDirectory>(
             runs, info_["run_id"].get<std::string>(), info_.dump(2), p_.input.case_toml,
-            io::mesh_info_json(p_.mesh, p_.mesh_hash),
+            p_.mesh_info,
             log_line("info", "solver", "run " + info_["run_id"].get<std::string>() + " started", "",
                      Json{{"cells", p_.mesh.n_cells()},
                           {"faces", p_.mesh.n_faces()},

@@ -17,6 +17,18 @@
       "polyhedron": 34222000
     }
   },
+  "bounds": {
+    "min": [
+      -20.0,
+      0.0,
+      -15.0
+    ],
+    "max": [
+      80.0,
+      50.0,
+      30.0
+    ]
+  },
   "boundary_zones": [
     {
       "name": "wing.slat",

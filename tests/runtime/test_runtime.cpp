@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <random>
 #include <regex>
@@ -32,6 +33,7 @@
 #include "autan/io/mesh_info.hpp"
 #include "autan/io/read_mesh.hpp"
 #include "autan/partition/partition.hpp"
+#include "autan/physics/euler_physics.hpp"
 #include "autan/runtime/input.hpp"
 #include "autan/runtime/run.hpp"
 #include "relaxation.hpp"
@@ -168,6 +170,21 @@ std::vector<double> solution_field(const fs::path& file, const char* solution, c
     REQUIRE(cg_field_read(fn, 1, 1, s, name, CGNS_ENUMV(RealDouble), &first, &size[1],
                           values.data()) == CG_OK);
   }
+  cg_close(fn);
+  return values;
+}
+
+// The node coordinates `axis` (CoordinateX, Y or Z) of a solution.cgns.
+std::vector<double> coordinates(const fs::path& file, const char* axis) {
+  int fn = 0;
+  REQUIRE(cg_open(file.string().c_str(), CG_MODE_READ, &fn) == CG_OK);
+  char zone_name[33];
+  cgsize_t size[9];
+  REQUIRE(cg_zone_read(fn, 1, 1, zone_name, size) == CG_OK);
+  std::vector<double> values(static_cast<std::size_t>(size[0]));
+  const cgsize_t first = 1;
+  REQUIRE(cg_coord_read(fn, 1, 1, axis, CGNS_ENUMV(RealDouble), &first, &size[0], values.data()) ==
+          CG_OK);
   cg_close(fn);
   return values;
 }
@@ -848,6 +865,13 @@ TEST_CASE("The input reader enforces the solver-input rules", "[runtime]") {
                     d["physics"]["turbulence"]["base"] = "sa";
                   })),
                   "E0705");
+  }
+  SECTION("the mesh scale is finite and positive") {
+    for (const double scale : {0.0, -0.0254}) {
+      CAPTURE(scale);
+      require_error(run(input([&](Json& d) { d["mesh"]["scale"] = scale; })), "E0705");
+    }
+    require_error(run(input([](Json& d) { d["mesh"].erase("scale"); })), "E0705");
   }
   SECTION("monitor names are unique") {
     require_error(run(input([](Json& d) { d["monitors"].push_back(d["monitors"][0]); })), "E0705");
@@ -1843,3 +1867,97 @@ TEST_CASE("Several ranks average and continue as one", "[runtime][mpi]") {
   }
 }
 #endif
+
+TEST_CASE("A mesh in inches gives the run of the same mesh in metres", "[runtime][unit]") {
+  // The hybrid mesh, and a copy whose points are divided by 0.0254 and
+  // declared in inches (mesh.scale = 0.0254, exactly one inch in metres):
+  // five explicit Euler steps of an inviscid flow at incidence give the same
+  // fields and forces to round-off of the precision, and the solution's
+  // coordinates in metres. (The SDK's test_solver_backend runs one file in m
+  // and in in through the SDK: its coordinates are then bit for bit.)
+  const char* precision = GENERATE("fp64", "fp32+acc64");
+  CAPTURE(precision);
+  const fs::path inches = fresh_dir() / "polyMesh";
+  fs::copy(mesh_path, inches);
+  {
+    std::ifstream in(mesh_path / "points");
+    std::ostringstream out;
+    const std::regex point(R"(^\(([^ ]+) ([^ ]+) ([^ ]+)\)$)");
+    char buffer[96];
+    for (std::string line; std::getline(in, line);) {
+      std::smatch m;
+      if (std::regex_match(line, m, point)) {
+        std::snprintf(buffer, sizeof buffer, "(%.17g %.17g %.17g)", std::stod(m[1]) / 0.0254,
+                      std::stod(m[2]) / 0.0254, std::stod(m[3]) / 0.0254);
+        line = buffer;
+      }
+      out << line << '\n';
+    }
+    std::ofstream(inches / "points") << out.str();
+  }
+  const auto euler = [&](Json& d) {
+    d["precision"] = precision;
+    inviscid(d);
+    for (auto& b : d["boundaries"]) {
+      if (b["zone"] == "ymin") b["kind"] = "slip";
+    }
+    d["monitors"][0]["every"] = 1;
+    d["time"] = {{"kind", "unsteady"},
+                 {"steps", 5},
+                 {"dt", nullptr},
+                 {"cfl", 0.8},
+                 {"average_from", nullptr}};
+  };
+  const Json metres = input(euler);
+  Json in_inches = metres;
+  {
+    std::string toml = in_inches["case"]["toml"];
+    const std::string unit = "mesh_unit = \"m\"";
+    REQUIRE(toml.find(unit) != std::string::npos);
+    in_inches["case"]["toml"] = toml.replace(toml.find(unit), unit.size(), "mesh_unit = \"in\"");
+  }
+  in_inches["mesh"] = {
+      {"path", inches.string()}, {"sha256", autan::io::mesh_hash(inches)}, {"scale", 0.0254}};
+  autan::runtime::PhysicsRegistry registry;
+  autan::physics::register_euler(registry);
+  const Outcome a = run(metres, registry);
+  const Outcome b = run(in_inches, registry);
+  REQUIRE(a.status == ExitStatus::finished);
+  REQUIRE(b.status == ExitStatus::finished);
+  // The archived MeshInfo describes the file, in its units.
+  CHECK(read(b.run / "mesh-info.json") ==
+        autan::io::mesh_info_json(autan::io::read_mesh(inches), autan::io::mesh_hash(inches)));
+
+  // The fields' precision; the coordinates are FP64 in either.
+  double eps = std::string(precision) == "fp64" ? 0x1p-52 : 0x1p-23;
+  const auto close = [&](const std::vector<double>& x, const std::vector<double>& y) {
+    REQUIRE(x.size() == y.size());
+    double scale = 0.0, worst = 0.0;
+    for (std::size_t i = 0; i < x.size(); ++i) {
+      scale = std::max(scale, std::abs(x[i]));
+      worst = std::max(worst, std::abs(x[i] - y[i]));
+    }
+    CAPTURE(worst / (eps * scale));
+    CHECK(worst <= 64 * eps * scale);
+  };
+  for (const char* field : {"Density", "VelocityX", "VelocityZ", "Pressure"}) {
+    CAPTURE(field);
+    close(solution_field(a.run / "solution.cgns", "FlowSolution", field),
+          solution_field(b.run / "solution.cgns", "FlowSolution", field));
+  }
+  const Json fa = history(a.run).back()["monitors"]["forces"];
+  const Json fb = history(b.run).back()["monitors"]["forces"];
+  const auto values = [](const Json& f, std::initializer_list<const char*> keys) {
+    std::vector<double> v;
+    for (const char* k : keys) v.push_back(f[k].get<double>());
+    return v;
+  };
+  close(values(fa, {"fx", "fy", "fz"}), values(fb, {"fx", "fy", "fz"}));
+  close(values(fa, {"mx", "my", "mz"}), values(fb, {"mx", "my", "mz"}));
+  close(values(fa, {"cd", "cs", "cl"}), values(fb, {"cd", "cs", "cl"}));
+  eps = 0x1p-52;
+  for (const char* axis : {"CoordinateX", "CoordinateY", "CoordinateZ"}) {
+    CAPTURE(axis);
+    close(coordinates(a.run / "solution.cgns", axis), coordinates(b.run / "solution.cgns", axis));
+  }
+}

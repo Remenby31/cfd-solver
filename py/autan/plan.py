@@ -43,7 +43,7 @@ from autan.schema import (
     Wall,
 )
 from autan.solver_input import gas_constant
-from autan.units import parse, si
+from autan.units import format_unit, metres_per, parse, si
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -207,11 +207,16 @@ def plan(case: Case, mesh: MeshInfo, *, gpus: int = 1) -> Plan:
     _check_interfaces(case, mesh, cell_zones, found)
     _check_monitors(case, spec, mesh, found)
 
+    scale = metres_per(spec.mesh_unit)
     return Plan(
         case={"name": spec.name, "sha256": spec.hash()},
         mesh={
             "path": mesh.source.path,
             "sha256": mesh.source.sha256,
+            "unit": format_unit(spec.mesh_unit),
+            "bounds": {
+                side: [x * scale for x in getattr(mesh.bounds, side)] for side in ("min", "max")
+            },
             "cells": mesh.counts.cells,
             "faces": mesh.counts.faces,
             "cells_by_type": mesh.counts.cells_by_type.model_dump(),

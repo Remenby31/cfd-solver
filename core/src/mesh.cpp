@@ -375,4 +375,40 @@ Mesh assemble(MeshInput in, AssemblyMap* map) {
   return mesh;
 }
 
+Mesh scaled(const Mesh& mesh, double scale) {
+  if (!(scale > 0.0) || !std::isfinite(scale)) {
+    throw Error(ErrorCode::mesh_index_out_of_range, "a mesh scale must be finite and positive");
+  }
+  const auto times = [scale](std::span<const double> v) {
+    std::vector<double> out(v.begin(), v.end());
+    for (double& x : out) x *= scale;
+    return out;
+  };
+  MeshInput in;
+  in.x = times(mesh.x());
+  in.y = times(mesh.y());
+  in.z = times(mesh.z());
+  in.face_node_offsets.assign(mesh.face_node_offsets().begin(), mesh.face_node_offsets().end());
+  in.face_nodes.assign(mesh.face_nodes().begin(), mesh.face_nodes().end());
+  in.face_zone.assign(mesh.face_zone().begin(), mesh.face_zone().end());
+  in.face_cell0.assign(mesh.owner().begin(), mesh.owner().end());
+  in.face_cell1.assign(static_cast<std::size_t>(mesh.n_faces()), no_cell);
+  std::copy(mesh.neighbour().begin(), mesh.neighbour().end(), in.face_cell1.begin());
+  in.cell_zone.assign(mesh.cell_zone().begin(), mesh.cell_zone().end());
+  in.cell_global_id.assign(mesh.cell_global_id().begin(), mesh.cell_global_id().end());
+  in.n_ghost_cells = mesh.n_cells() - mesh.n_owned_cells();
+  for (auto t : mesh.ghost_translation()) {
+    for (double& c : t) c *= scale;
+    in.ghost_translation.push_back(t);
+  }
+  in.face_zones.assign(mesh.face_zones().begin(), mesh.face_zones().end());
+  in.cell_zones.assign(mesh.cell_zones().begin(), mesh.cell_zones().end());
+  in.periodic.assign(mesh.periodic_pairs().begin(), mesh.periodic_pairs().end());
+  for (auto& pair : in.periodic) {
+    for (double& c : pair.translation) c *= scale;
+  }
+  in.source = mesh.source();
+  return assemble(std::move(in));
+}
+
 }  // namespace autan

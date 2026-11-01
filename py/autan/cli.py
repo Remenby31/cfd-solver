@@ -75,9 +75,16 @@ def _plan_text(result: Plan) -> str:
     lines = [
         f"case        {result.case['name']}  (sha256 {result.case['sha256'][:12]})",
         (
-            f"mesh        {mesh['path']} · {_millions(mesh['cells'])} cells · {poly:.0f} % polyhedra"
+            f"mesh        {mesh['path']} ({mesh['unit']}) · {_millions(mesh['cells'])} cells"
+            f" · {poly:.0f} % polyhedra"
             f" · max non-orth. {mesh['quality']['max_non_orthogonality_deg']:g}°"
         ),
+        "extent      "
+        + " x ".join(
+            f"{high - low:.4g}"
+            for low, high in zip(mesh["bounds"]["min"], mesh["bounds"]["max"], strict=True)
+        )
+        + " m",
         f"boundaries  {covered}/{needing} zones covered",
     ]
     width = max([len(b.zone) for b in result.boundaries] + [4])

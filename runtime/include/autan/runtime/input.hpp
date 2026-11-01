@@ -134,7 +134,8 @@ struct PeriodicInput {
 struct SolverInput {
   std::string case_name, case_sha256, case_toml;
   std::string mesh_path, mesh_sha256;
-  std::string precision;  ///< "fp32+acc64" or "fp64"
+  double mesh_scale = 1.0;  ///< metres per mesh unit (solver-input.md, mesh.scale)
+  std::string precision;    ///< "fp32+acc64" or "fp64"
   bool deterministic = false;
   std::string device_kind;  ///< cpu, cuda, hip
   std::int64_t device_count = 1;

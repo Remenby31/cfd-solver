@@ -17,6 +17,18 @@
       "polyhedron": 200000
     }
   },
+  "bounds": {
+    "min": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "max": [
+      1.0,
+      0.2,
+      0.1
+    ]
+  },
   "boundary_zones": [
     {
       "name": "air-inlet",
