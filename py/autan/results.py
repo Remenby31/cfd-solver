@@ -137,6 +137,7 @@ class RunInfo(_Strict):
     solver: Solver
     precision: Literal["fp32+acc64", "fp64"]
     devices: Devices
+    cell_order: Literal["rcm", "input"]
     started: str
     finished: str | None
     iterations: Annotated[int, Field(ge=0)]
@@ -167,10 +168,12 @@ def identity(
     solver: Solver,
     precision: str,
     devices: Devices,
+    cell_order: str,
     start: StartInfo | None = None,
 ) -> str:
     """The reproducibility fingerprint of a run (results.md, ``identity``)."""
     parts = [case, mesh, solver.commit, precision, solver.backend, devices.kind, str(devices.count)]
+    parts.append(cell_order)
     if start is not None:
         parts += [start.identity, start.mode, str(start.iterations), start.solution_sha256]
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
@@ -641,7 +644,13 @@ def run_problems(path: Path, run: RunInfo, case: CaseSpec, mesh_info: MeshInfo) 
     if run.finished is not None and not _TIMESTAMP.fullmatch(run.finished):
         found.append(f"finished {run.finished!r} is not a UTC ISO 8601 timestamp")
     expected = identity(
-        case.hash(), mesh_info.source.sha256, run.solver, run.precision, run.devices, run.start
+        case.hash(),
+        mesh_info.source.sha256,
+        run.solver,
+        run.precision,
+        run.devices,
+        run.cell_order,
+        run.start,
     )
     if run.identity != expected:
         found.append("identity does not match its definition")

@@ -32,6 +32,7 @@
 #include "autan/io/mesh_info.hpp"
 #include "autan/io/read_mesh.hpp"
 #include "autan/partition/partition.hpp"
+#include "autan/physics/euler_physics.hpp"
 #include "autan/runtime/input.hpp"
 #include "autan/runtime/run.hpp"
 #include "relaxation.hpp"
@@ -314,11 +315,13 @@ TEST_CASE("A converging run writes the run directory of results.md", "[runtime]"
                          std::regex("[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z")));
   CHECK(info["mesh"]["path"] == fs::absolute(mesh_path).lexically_normal().string());
   CHECK(info["solver"] == Json{{"version", "0.0.0"}, {"commit", build.commit}, {"backend", "cpu"}});
-  // identity: SHA-256 of the seven fields joined by "\n" (results.md).
+  // identity: SHA-256 of the eight fields joined by "\n" (results.md); the
+  // cell order is RCM by default.
+  CHECK(info["cell_order"] == "rcm");
   std::string expected;
   picosha2::hash256_hex_string(doc["case"]["sha256"].get<std::string>() + "\n" +
                                    doc["mesh"]["sha256"].get<std::string>() + "\n" + build.commit +
-                                   "\nfp32+acc64\ncpu\ncpu\n1",
+                                   "\nfp32+acc64\ncpu\ncpu\n1\nrcm",
                                expected);
   CHECK(info["identity"] == expected);
   CHECK(read(o.run / "case.toml") == doc["case"]["toml"].get<std::string>());
@@ -904,7 +907,9 @@ TEST_CASE("log.jsonl records the run's events in the results.md shape", "[runtim
     CHECK(l["data"].is_object());
   }
   CHECK(lines.front()["iteration"].is_null());
-  CHECK(lines[1]["message"] == "relaxation physics ready");  // the physics' own line
+  // The physics' own line, after the runtime's (the cell order).
+  CHECK(std::ranges::any_of(
+      lines, [](const Json& l) { return l["message"] == "relaxation physics ready"; }));
   // The run.json diagnostic appears with its code and data.
   const Json info = Json::parse(read(o.run / "run.json"));
   const auto d0107 =
@@ -953,6 +958,12 @@ TEST_CASE("A continued run goes on bit for bit from the run it continues", "[run
   second["start"] = start_from(m.run, "continue");
   const Outcome b = run(second, options);
   REQUIRE(b.status == ExitStatus::finished);
+  // In another cell order than the run it continues, whose bits it would
+  // change from the restart on, a continuation is refused.
+  REQUIRE(setenv("AUTAN_CELL_ORDER", "input", 1) == 0);
+  const Outcome other_order = run(second, options);
+  unsetenv("AUTAN_CELL_ORDER");
+  require_error(other_order, "E0708");
 
   const auto all = lines_of(whole.run / "history.jsonl");
   auto chain = lines_of(a.run / "history.jsonl");
@@ -970,13 +981,13 @@ TEST_CASE("A continued run goes on bit for bit from the run it continues", "[run
   Json expected_start = second["start"];
   expected_start.erase("run");
   CHECK(info["start"] == expected_start);
-  // identity: the seven parts, then the start's identity, mode, iterations
+  // identity: the eight parts, then the start's identity, mode, iterations
   // and solution hash, joined by "\n" (results.md).
   const auto& s = second["start"];
   std::string identity;
   picosha2::hash256_hex_string(second["case"]["sha256"].get<std::string>() + "\n" +
                                    second["mesh"]["sha256"].get<std::string>() + "\n" +
-                                   build.commit + "\nfp32+acc64\ncpu\ncpu\n1\n" +
+                                   build.commit + "\nfp32+acc64\ncpu\ncpu\n1\nrcm\n" +
                                    s["identity"].get<std::string>() + "\ncontinue\n" +
                                    std::to_string(s["iterations"].get<int>()) + "\n" +
                                    s["solution_sha256"].get<std::string>(),
@@ -1614,32 +1625,16 @@ TEST_CASE("Several ranks give the bits of one", "[runtime][mpi][gpu]") {
                                       "AUTAN_TEST_GROWTH=0.001", "AUTAN_TEST_VARY=1"});
 
   CHECK(lines_of(many / "history.jsonl") == lines_of(one.run / "history.jsonl"));
-  // Reproducibility "ranks": a partition even on one rank, and face keys that
-  // match the mesh file on 1 and N ranks (the physics checks them); a run on
-  // several ranks in another mode says its results depend on the count.
-  Json keyed = doc;
-  keyed["reproducibility"] = "ranks";
-  autan_test::RelaxationOptions checking = options;
-  checking.check_keys = true;
-  const Outcome one_keyed = run(keyed, checking);
-  REQUIRE(one_keyed.status == ExitStatus::finished);
-  const fs::path many_keyed =
-      run_on_ranks(keyed, ranks,
-                   {"AUTAN_TEST_FACTOR=0.9", "AUTAN_TEST_PRESSURE_OFFSET=1000",
-                    "AUTAN_TEST_GROWTH=0.001", "AUTAN_TEST_VARY=1", "AUTAN_TEST_CHECK_KEYS=1"});
-  CHECK(Json::parse(read(many_keyed / "run.json"))["status"] == "completed");
-  CHECK(lines_of(many_keyed / "history.jsonl") == lines_of(one_keyed.run / "history.jsonl"));
-  CHECK(solution_field(many_keyed / "solution.cgns", "FlowSolution", "Pressure") ==
-        solution_field(one_keyed.run / "solution.cgns", "FlowSolution", "Pressure"));
-  const auto has_event = [](const fs::path& run_dir) {
-    std::ifstream in(run_dir / "log.jsonl");
-    for (std::string line; std::getline(in, line);) {
-      if (Json::parse(line)["data"].contains("mode")) return true;
-    }
-    return false;
-  };
-  CHECK(has_event(many));
-  CHECK_FALSE(has_event(many_keyed));
+  // In the mesh's own order too (AUTAN_CELL_ORDER=input; RCM is the
+  // default): partitioned on other cells, the same outputs.
+  const fs::path rcm = run_on_ranks(
+      doc, ranks,
+      {"AUTAN_CELL_ORDER=input", "AUTAN_TEST_FACTOR=0.9", "AUTAN_TEST_PRESSURE_OFFSET=1000",
+       "AUTAN_TEST_GROWTH=0.001", "AUTAN_TEST_VARY=1"});
+  CHECK(lines_of(rcm / "history.jsonl") == lines_of(one.run / "history.jsonl"));
+  CHECK(solution_field(rcm / "solution.cgns", "FlowSolution", "Pressure") ==
+        solution_field(one.run / "solution.cgns", "FlowSolution", "Pressure"));
+  CHECK(wall_solution(rcm / "solution.cgns") == wall_solution(one.run / "solution.cgns"));
   // A smoother sweeping the global colours (PhysicsContext::cell_colours),
   // the ghosts exchanged after each colour, and an argmin over the ranks:
   // the history of one rank.
@@ -1660,6 +1655,44 @@ TEST_CASE("Several ranks give the bits of one", "[runtime][mpi][gpu]") {
   CHECK(solution_field(many_swept / "solution.cgns", "FlowSolution", "TurbulentSANuTilde") ==
         swept_one);
   if (!periodic) CHECK(swept_one == swept(autan::io::read_mesh(mesh_path), 12, 2));
+  // Reproducibility "ranks": a partition even on one rank, and face keys that
+  // match the mesh file on 1 and N ranks (the physics checks them); a run on
+  // several ranks in another mode says its results depend on the count.
+  Json keyed = doc;
+  keyed["reproducibility"] = "ranks";
+  autan_test::RelaxationOptions checking = options;
+  checking.check_keys = true;
+  const Outcome one_keyed = run(keyed, checking);
+  REQUIRE(one_keyed.status == ExitStatus::finished);
+  const fs::path many_keyed =
+      run_on_ranks(keyed, ranks,
+                   {"AUTAN_TEST_FACTOR=0.9", "AUTAN_TEST_PRESSURE_OFFSET=1000",
+                    "AUTAN_TEST_GROWTH=0.001", "AUTAN_TEST_VARY=1", "AUTAN_TEST_CHECK_KEYS=1"});
+  CHECK(Json::parse(read(many_keyed / "run.json"))["status"] == "completed");
+  CHECK(lines_of(many_keyed / "history.jsonl") == lines_of(one_keyed.run / "history.jsonl"));
+  CHECK(solution_field(many_keyed / "solution.cgns", "FlowSolution", "Pressure") ==
+        solution_field(one_keyed.run / "solution.cgns", "FlowSolution", "Pressure"));
+  // The keys name the mesh file's faces through the RCM renumbering (the
+  // default) and its flipped faces: in the mesh's own order the physics
+  // finds the same keys, so "ranks" gives the same bits in either order.
+  const fs::path input_keyed = run_on_ranks(
+      keyed, ranks,
+      {"AUTAN_CELL_ORDER=input", "AUTAN_TEST_FACTOR=0.9", "AUTAN_TEST_PRESSURE_OFFSET=1000",
+       "AUTAN_TEST_GROWTH=0.001", "AUTAN_TEST_VARY=1", "AUTAN_TEST_CHECK_KEYS=1"});
+  CHECK(lines_of(input_keyed / "history.jsonl") == lines_of(one_keyed.run / "history.jsonl"));
+  CHECK(solution_field(input_keyed / "solution.cgns", "FlowSolution", "Pressure") ==
+        solution_field(one_keyed.run / "solution.cgns", "FlowSolution", "Pressure"));
+  // On one rank in "run", the renumbered mesh without a partition: its keys too.
+  if (!periodic) CHECK(run(doc, checking).status == ExitStatus::finished);
+  const auto has_event = [](const fs::path& run_dir) {
+    std::ifstream in(run_dir / "log.jsonl");
+    for (std::string line; std::getline(in, line);) {
+      if (Json::parse(line)["data"].contains("mode")) return true;
+    }
+    return false;
+  };
+  CHECK(has_event(many));
+  CHECK_FALSE(has_event(many_keyed));
 #ifdef AUTAN_HAVE_CUDA
   // On CUDA devices, the ranks sharing the host's GPUs: the relaxation
   // physics checks at every step that the exchange fills its ghosts in
@@ -1815,3 +1848,128 @@ TEST_CASE("Several ranks average and continue as one", "[runtime][mpi]") {
   }
 }
 #endif
+
+TEST_CASE("Cells renumbered in RCM order give the run of the mesh's order", "[runtime][renumber]") {
+  // By default autan-run computes on the mesh renumbered in reverse
+  // Cuthill-McKee order; every output keeps the mesh's numbering.
+  // AUTAN_CELL_ORDER=input keeps the mesh's own order.
+  struct InputOrder {
+    InputOrder() { REQUIRE(setenv("AUTAN_CELL_ORDER", "input", 1) == 0); }
+    ~InputOrder() { unsetenv("AUTAN_CELL_ORDER"); }
+    InputOrder(const InputOrder&) = delete;
+    InputOrder& operator=(const InputOrder&) = delete;
+  };
+  SECTION("bit for bit when nothing sums over faces: the relaxation physics") {
+    // Fields that vary per cell, forces at every iteration, a cell that
+    // diverges, an initial state and the periodic box: each output mapped back.
+    const bool periodic = GENERATE(false, true);
+    CAPTURE(periodic);
+    const auto edit = [](Json& d) {
+      d["monitors"][0]["every"] = 1;
+      d["time"]["max_iterations"] = 12;
+    };
+    const Json doc = periodic ? periodic_input(1.0, edit) : input(edit);
+    const autan_test::RelaxationOptions options{
+        .factor = 0.9, .pressure_offset = 1000.0, .growth = 1e-3, .vary = true};
+    Outcome a;
+    {
+      const InputOrder input_order;
+      a = run(doc, options);
+    }
+    REQUIRE(a.status == ExitStatus::finished);
+    const Outcome b = run(doc, options);
+    REQUIRE(b.status == ExitStatus::finished);
+    // The order is recorded and part of the identity (results.md).
+    const Json info_a = Json::parse(read(a.run / "run.json"));
+    const Json info_b = Json::parse(read(b.run / "run.json"));
+    CHECK(info_a["cell_order"] == "input");
+    CHECK(info_b["cell_order"] == "rcm");
+    CHECK(info_a["identity"] != info_b["identity"]);
+    CHECK(lines_of(a.run / "history.jsonl") == lines_of(b.run / "history.jsonl"));
+    for (const char* field : {"Density", "VelocityX", "Pressure"}) {
+      CAPTURE(field);
+      CHECK(solution_field(a.run / "solution.cgns", "FlowSolution", field) ==
+            solution_field(b.run / "solution.cgns", "FlowSolution", field));
+    }
+    std::ifstream log_in(b.run / "log.jsonl");
+    bool renumbered = false;
+    for (std::string line; std::getline(log_in, line);)
+      renumbered = renumbered || Json::parse(line)["data"].value("order", "") == "rcm";
+    CHECK(renumbered);
+    const auto diverged = [&](const Json& d) {
+      const Outcome o = run(d, {.factor = 0.9, .diverge_at = 3, .diverge_cell = 7});
+      return Json::parse(read(o.run / "run.json"))["diagnostics"];
+    };
+    const Json in_rcm = diverged(doc);
+    {
+      const InputOrder input_order;
+      CHECK(diverged(doc) == in_rcm);
+    }
+    if (!periodic) {
+      Json plain = doc;
+      inviscid(plain);
+      const Json from_file = with_initial_state(plain, initial_state_document(mesh_path));
+      const Outcome c = run(from_file, options);
+      const InputOrder input_order;
+      const Outcome d = run(from_file, options);
+      CHECK(solution_field(c.run / "solution.cgns", "FlowSolution", "Pressure") ==
+            solution_field(d.run / "solution.cgns", "FlowSolution", "Pressure"));
+    }
+  }
+  SECTION("to round-off under the Euler physics, which sums faces in their order") {
+    // Five explicit SSP-RK3 steps of an inviscid flow at incidence, so not
+    // uniform near the symmetry plane zmax, on each mesh family and in each
+    // precision: only the order of the face sums differs, so every field
+    // agrees to a few units of the precision's epsilon of its magnitude.
+    const char* family = GENERATE("tet", "hex", "poly", "hybrid");
+    const char* precision = GENERATE("fp64", "fp32+acc64");
+    CAPTURE(family, precision);
+    const fs::path mesh_file = data_dir / "mesh" / family / "polyMesh";
+    const autan::Mesh mesh = autan::io::read_mesh(mesh_file);
+    const Json doc = input([&](Json& d) {
+      d["mesh"]["path"] = fs::absolute(mesh_file).string();
+      d["mesh"]["sha256"] = autan::io::mesh_hash(mesh_file);
+      d["precision"] = precision;
+      inviscid(d);
+      for (auto& b : d["boundaries"]) {
+        if (b["zone"] == "ymin") b["kind"] = "slip";
+      }
+      Json zones = Json::array();
+      for (const auto z : autan::io::meshinfo_zones(mesh).cell) {
+        Json zone = d["cell_zones"][0];
+        zone["zone"] = mesh.cell_zones()[static_cast<std::size_t>(z)].name;
+        zones.push_back(zone);
+      }
+      d["cell_zones"] = zones;
+      d["time"] = {{"kind", "unsteady"},
+                   {"steps", 5},
+                   {"dt", nullptr},
+                   {"cfl", 0.8},
+                   {"average_from", nullptr}};
+    });
+    autan::runtime::PhysicsRegistry euler;
+    autan::physics::register_euler(euler);
+    Outcome a;
+    {
+      const InputOrder input_order;
+      a = run(doc, euler);
+    }
+    REQUIRE(a.status == ExitStatus::finished);
+    const Outcome b = run(doc, euler);
+    REQUIRE(b.status == ExitStatus::finished);
+    const double eps = std::string(precision) == "fp64" ? 0x1p-52 : 0x1p-23;
+    for (const char* field : {"Density", "VelocityX", "VelocityZ", "Pressure"}) {
+      CAPTURE(field);
+      const auto x = solution_field(a.run / "solution.cgns", "FlowSolution", field);
+      const auto y = solution_field(b.run / "solution.cgns", "FlowSolution", field);
+      REQUIRE(x.size() == y.size());
+      double scale = 0.0, worst = 0.0;
+      for (std::size_t c = 0; c < x.size(); ++c) {
+        scale = std::max(scale, std::abs(x[c]));
+        worst = std::max(worst, std::abs(x[c] - y[c]));
+      }
+      CAPTURE(worst / (eps * scale));
+      CHECK(worst <= 64 * eps * scale);
+    }
+  }
+}

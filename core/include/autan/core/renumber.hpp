@@ -3,6 +3,7 @@
 #include <span>
 #include <vector>
 
+#include "autan/core/geometry.hpp"
 #include "autan/core/mesh.hpp"
 
 namespace autan {
@@ -18,7 +19,18 @@ std::vector<index_t> rcm_order(const Mesh& mesh);
 /// new_to_old[i] of `mesh`) and its faces re-sorted by assemble(). Any
 /// permutation that maps owned cells to owned positions is accepted, so other
 /// orderings (space-filling curves) plug in here. Every cell keeps its global
-/// id. Throws E0102 for an invalid permutation.
-Mesh renumber_cells(const Mesh& mesh, std::span<const index_t> new_to_old);
+/// id. `map`, when given, receives assemble()'s map, whose face_source gives
+/// each face of the result as a face of `mesh`. Throws E0102 for an invalid
+/// permutation.
+Mesh renumber_cells(const Mesh& mesh, std::span<const index_t> new_to_old,
+                    AssemblyMap* map = nullptr);
+
+/// The geometry of renumber_cells(mesh, new_to_old, &map) taken from
+/// `geometry`, the geometry of `mesh`: cells and faces permuted, the area
+/// vector of a flipped face negated. Its bits are those of `mesh`'s, whereas
+/// compute_geometry on the renumbered mesh sums each cell's faces in another
+/// order. Throws E0102 for sizes that do not match.
+Geometry renumber_geometry(const Geometry& geometry, std::span<const index_t> new_to_old,
+                           const AssemblyMap& map);
 
 }  // namespace autan

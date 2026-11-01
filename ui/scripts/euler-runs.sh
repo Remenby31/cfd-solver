@@ -4,7 +4,6 @@
 # attack (a polar for Compare). Meant for a DGX Spark through docker/spark.sh after
 #   cmake --build build --target autan-run autan-mesh-info
 # with the NACA mesh written by ui/scripts/naca0012_mesh.py, at build/naca0012.msh by default.
-# The NACA runs target 2.4 orders: their fp32 residuals level off at 2.4 to 2.6 on this mesh.
 set -eu
 runs=${1:?usage: euler-runs.sh RUNS [NACA_MESH]}
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -53,7 +52,7 @@ from autan.units import K, Pa, deg, m
 case = autan.Case("naca0012", mesh=os.environ["NACA_MESH"])
 case.physics = autan.Compressible(turbulence=autan.Inviscid())
 case.freestream(mach=0.5, aoa=$aoa * deg, pressure=101325 * Pa, temperature=288.15 * K, ref_length=1.0 * m)
-case.time = autan.Steady(max_iterations=20000, residual_orders=2.4)
+case.time = autan.Steady()
 case.boundary("airfoil").slip()
 case.boundary("farfield").farfield()
 case.boundary("symmetry").symmetry()

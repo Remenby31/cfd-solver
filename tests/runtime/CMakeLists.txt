@@ -9,6 +9,7 @@ target_link_libraries(
   autan_runtime_tests
   PRIVATE
     autan::runtime
+    autan::physics_runtime
     autan_cgns
     nlohmann_json::nlohmann_json
     Catch2::Catch2WithMain

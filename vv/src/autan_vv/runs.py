@@ -251,13 +251,16 @@ def write_run(
     devices = Devices(kind="cpu", count=1)
     run = RunInfo(
         run_id=RunWriter.new_run_id(started),
-        identity=identity(spec.hash(), info.source.sha256, solver, spec.physics.precision, devices),
+        identity=identity(
+            spec.hash(), info.source.sha256, solver, spec.physics.precision, devices, "input"
+        ),
         status="running",
         case=CaseIdentity(name=spec.name, sha256=spec.hash()),
         mesh=MeshIdentity(path=str(case.mesh_path), sha256=info.source.sha256),
         solver=solver,
         precision=spec.physics.precision,
         devices=devices,
+        cell_order="input",
         started=iso(started),
         finished=None,
         iterations=0,

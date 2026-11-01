@@ -145,7 +145,7 @@ std::vector<index_t> rcm_order(const Mesh& mesh) {
   return order;
 }
 
-Mesh renumber_cells(const Mesh& mesh, std::span<const index_t> new_to_old) {
+Mesh renumber_cells(const Mesh& mesh, std::span<const index_t> new_to_old, AssemblyMap* map) {
   const auto n_cells = at(mesh.n_cells());
   if (new_to_old.size() != n_cells) {
     throw Error(ErrorCode::mesh_index_out_of_range, "permutation size differs from the cell count");
@@ -193,7 +193,42 @@ Mesh renumber_cells(const Mesh& mesh, std::span<const index_t> new_to_old) {
   in.cell_zones.assign(mesh.cell_zones().begin(), mesh.cell_zones().end());
   in.periodic.assign(mesh.periodic_pairs().begin(), mesh.periodic_pairs().end());
   in.source = mesh.source();
-  return assemble(std::move(in));
+  // Input face f is face f of `mesh`, so the map's face_source names them.
+  return assemble(std::move(in), map);
+}
+
+Geometry renumber_geometry(const Geometry& geometry, std::span<const index_t> new_to_old,
+                           const AssemblyMap& map) {
+  const std::size_t n_faces = map.face_source.size();
+  if (new_to_old.size() != geometry.cell_volume.size() || n_faces != geometry.face_area.size() ||
+      map.face_reversed.size() != n_faces) {
+    throw Error(ErrorCode::mesh_index_out_of_range,
+                "the renumbering does not match the geometry's cells and faces");
+  }
+  Geometry out;
+  const auto cells = [&](const std::vector<double>& from, std::vector<double>& to) {
+    to.resize(new_to_old.size());
+    for (std::size_t i = 0; i < to.size(); ++i) to[i] = from[at(new_to_old[i])];
+  };
+  const auto faces = [&](const std::vector<double>& from, std::vector<double>& to, bool vector) {
+    to.resize(n_faces);
+    for (std::size_t f = 0; f < n_faces; ++f) {
+      const double v = from[at(map.face_source[f])];
+      to[f] = vector && map.face_reversed[f] != 0 ? -v : v;
+    }
+  };
+  faces(geometry.face_area_x, out.face_area_x, true);
+  faces(geometry.face_area_y, out.face_area_y, true);
+  faces(geometry.face_area_z, out.face_area_z, true);
+  faces(geometry.face_area, out.face_area, false);
+  faces(geometry.face_centroid_x, out.face_centroid_x, false);
+  faces(geometry.face_centroid_y, out.face_centroid_y, false);
+  faces(geometry.face_centroid_z, out.face_centroid_z, false);
+  cells(geometry.cell_volume, out.cell_volume);
+  cells(geometry.cell_centroid_x, out.cell_centroid_x);
+  cells(geometry.cell_centroid_y, out.cell_centroid_y);
+  cells(geometry.cell_centroid_z, out.cell_centroid_z);
+  return out;
 }
 
 }  // namespace autan
