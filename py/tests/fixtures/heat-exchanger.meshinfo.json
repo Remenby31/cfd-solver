@@ -101,5 +101,7 @@
   "quality": {
     "max_non_orthogonality_deg": 35.0,
     "max_faces_per_cell": 18
-  }
+  },
+  "groups": [],
+  "groups_source": null
 }

@@ -83,15 +83,21 @@ def _statements(spec: CaseSpec, value: _Values) -> list[str]:
         out.append(_statement("", _Call(f".{medium.kind}", arguments, selector)))
     for rule in spec.boundaries:
         condition = rule.condition
-        selector = _Call("case.boundary", (value(rule.zones),))
+        selector = _Call("case.boundary", (_selection(value, rule.zones, rule.group),))
         method = f".{condition.kind.replace('-', '_')}"
         out.append(_statement("", _Call(method, value.keywords(condition), selector)))
     for monitor in spec.monitors:
-        chosen = value.keywords(monitor, skip=frozenset({"surfaces", "every"}))
-        forces = _Call("autan.forces", (value(monitor.surfaces), *chosen))
+        chosen = value.keywords(monitor, skip=frozenset({"surfaces", "group", "every"}))
+        selection = _selection(value, monitor.surfaces, monitor.group)
+        forces = _Call("autan.forces", (selection, *chosen))
         every = (_Keyword("every", value(monitor.every)),) if monitor.every != 1 else ()
         out.append(_statement("", _Call("case.monitor", (forces, *every))))
     return out
+
+
+def _selection(value: _Values, zones: str | None, group: str | None) -> _Expr | _Keyword:
+    # A glob over zone names is positional, a group glob a keyword.
+    return value(zones) if zones is not None else _Keyword("group", value(group))
 
 
 def _freestream(spec: CaseSpec) -> Freestream:

@@ -256,10 +256,16 @@ InitialState parse_initial(const Json& value, const std::string& path, const Sol
 
 BoundaryInput parse_boundary(const Json& value, const std::string& path) {
   const Object o(value, path,
-                 {"zone", "kind", "temperature", "total_pressure", "total_temperature", "velocity",
-                  "static_pressure", "states", "point_vortex"});
+                 {"zone", "rule", "kind", "temperature", "total_pressure", "total_temperature",
+                  "velocity", "static_pressure", "states", "point_vortex"});
   BoundaryInput b;
   b.zone = o.string("zone");
+  // The case rule the SDK resolved the zone with: checked, of no use to the run.
+  if (!o.is_null("rule")) {
+    const Json& rule = o.get("rule");
+    if (!rule.is_number_integer() || rule.get<std::int64_t>() < 0)
+      invalid(path + ".rule", "expected an integer >= 0 or null");
+  }
   b.kind = o.tag("kind", {"wall", "slip", "symmetry", "farfield", "inlet", "velocity-inlet",
                           "outlet", "manufactured", "oracle-state"});
   if (b.kind == "oracle-state") {
@@ -411,12 +417,13 @@ SolverInput parse_solver_input(const std::string& text) {
     in.case_name = c.string("name");
     in.case_sha256 = sha256(c, "sha256");
     in.case_toml = c.string("toml");
-    const Object m(root.get("mesh"), "mesh", {"path", "sha256", "scale"});
+    const Object m(root.get("mesh"), "mesh", {"path", "sha256", "scale", "groups_sha256"});
     in.mesh_path = m.string("path");
     if (!std::filesystem::path(in.mesh_path).is_absolute())
       invalid("mesh.path", "must be an absolute path");
     in.mesh_sha256 = sha256(m, "sha256");
     in.mesh_scale = m.positive("scale");
+    if (!m.is_null("groups_sha256")) in.mesh_groups_sha256 = sha256(m, "groups_sha256");
   }
   if (!root.is_null("verification")) {
     const Object v(root.get("verification"), "verification", {"path", "sha256"});

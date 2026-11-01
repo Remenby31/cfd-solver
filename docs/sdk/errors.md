@@ -252,6 +252,38 @@ An entity belongs to several zones in the source (Gmsh entity in two physical gr
 
 Fix: Assign each entity to one zone in the meshing tool.
 
+## E0136
+
+**Zone groups file unreadable** (error)
+
+The mesh's `<mesh>.zones.json` is not JSON, or not an `autan.zone-groups/1` document (missing or unknown key, wrong type).
+
+Fix: Fix the file against docs/contracts/mesh-info.md, or remove it.
+
+## E0137
+
+**Zone groups file describes another mesh** (error)
+
+The `mesh_sha256` of the mesh's `<mesh>.zones.json` differs from the mesh hash, or the file the runtime reads differs from the solver input's `mesh.groups_sha256`.
+
+Fix: Regenerate the groups for this mesh, then the MeshInfo and the solver input.
+
+## E0138
+
+**Bad zone group** (error)
+
+A group of the mesh's `<mesh>.zones.json` names a boundary zone the mesh does not have (names are exact, spaces included), lists a zone twice, is empty, or has a name outside `[A-Za-z0-9_.-]` or starting with `-`.
+
+Fix: Correct the group against the zone names of the mesh's MeshInfo.
+
+## E0139
+
+**Zone group defined twice** (error)
+
+Two groups of the mesh's `<mesh>.zones.json` have the same name.
+
+Fix: Give each group one entry.
+
 ## E0140
 
 **Invalid partition request** (error)
@@ -379,6 +411,22 @@ Fix: Point the case at a manufactured solution exported by autan-vv.
 The constants the manufactured solution declares (gamma, gas constant, viscosity, Prandtl number) differ from the case's gas, its declared model is not compressible flow with the case's turbulence model, or the case has cell zone rules a single-medium solution cannot cover. The message names the difference.
 
 Fix: Build the case gas from the solution's parameters, or export the solution the case needs.
+
+## E0210
+
+**The MeshInfo's zone groups describe another groups file** (error)
+
+The SHA-256 of the mesh's `<mesh>.zones.json` differs from the MeshInfo `groups_source.sha256`, or the file exists and the MeshInfo has no groups: the groups the case selects would not be the ones the MeshInfo lists.
+
+Fix: Regenerate the MeshInfo with `autan-mesh-info` after changing the groups file.
+
+## W0211
+
+**Zone groups file not found** (warning)
+
+The MeshInfo has zone groups but the `<mesh>.zones.json` next to the case's mesh does not exist, so `plan` cannot check that they still describe it.
+
+Fix: Put the groups file next to the mesh.
 
 ## E0301
 
@@ -539,6 +587,14 @@ Fix: Remove the rule, or change the mesh if the zone is not meant to be periodic
 The `surfaces` of a farfield's `point_vortex` match no boundary zone, name a zone of a periodic pair, or match zones that are not wall or slip zones: the vortex's circulation comes from the lift on the body. Patterns with wildcards skip periodic zones.
 
 Fix: Give a pattern that matches the walls of the lifting body, e.g. `surfaces="wing.*"`.
+
+## E0426
+
+**Zone group pattern matches no group** (error)
+
+A selection's `group` (a glob over the zone group names of the mesh's MeshInfo) matches no group. Groups come from the mesh's `<mesh>.zones.json`.
+
+Fix: Use one of the group names the message lists, or select zones by name.
 
 ## E0501
 

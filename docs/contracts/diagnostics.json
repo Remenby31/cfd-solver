@@ -187,6 +187,30 @@
       "fix": "Assign each entity to one zone in the meshing tool.",
       "doc": "https://remenby31.github.io/autan/sdk/errors/#e0135"
     },
+    "E0136": {
+      "severity": "error",
+      "title": "Zone groups file unreadable",
+      "fix": "Fix the file against docs/contracts/mesh-info.md, or remove it.",
+      "doc": "https://remenby31.github.io/autan/sdk/errors/#e0136"
+    },
+    "E0137": {
+      "severity": "error",
+      "title": "Zone groups file describes another mesh",
+      "fix": "Regenerate the groups for this mesh, then the MeshInfo and the solver input.",
+      "doc": "https://remenby31.github.io/autan/sdk/errors/#e0137"
+    },
+    "E0138": {
+      "severity": "error",
+      "title": "Bad zone group",
+      "fix": "Correct the group against the zone names of the mesh's MeshInfo.",
+      "doc": "https://remenby31.github.io/autan/sdk/errors/#e0138"
+    },
+    "E0139": {
+      "severity": "error",
+      "title": "Zone group defined twice",
+      "fix": "Give each group one entry.",
+      "doc": "https://remenby31.github.io/autan/sdk/errors/#e0139"
+    },
     "E0140": {
       "severity": "error",
       "title": "Invalid partition request",
@@ -282,6 +306,18 @@
       "title": "Manufactured solution does not match the case",
       "fix": "Build the case gas from the solution's parameters, or export the solution the case needs.",
       "doc": "https://remenby31.github.io/autan/sdk/errors/#e0209"
+    },
+    "E0210": {
+      "severity": "error",
+      "title": "The MeshInfo's zone groups describe another groups file",
+      "fix": "Regenerate the MeshInfo with `autan-mesh-info` after changing the groups file.",
+      "doc": "https://remenby31.github.io/autan/sdk/errors/#e0210"
+    },
+    "W0211": {
+      "severity": "warning",
+      "title": "Zone groups file not found",
+      "fix": "Put the groups file next to the mesh.",
+      "doc": "https://remenby31.github.io/autan/sdk/errors/#w0211"
     },
     "E0301": {
       "severity": "error",
@@ -402,6 +438,12 @@
       "title": "Point-vortex surfaces match no wall",
       "fix": "Give a pattern that matches the walls of the lifting body, e.g. `surfaces=\"wing.*\"`.",
       "doc": "https://remenby31.github.io/autan/sdk/errors/#e0425"
+    },
+    "E0426": {
+      "severity": "error",
+      "title": "Zone group pattern matches no group",
+      "fix": "Use one of the group names the message lists, or select zones by name.",
+      "doc": "https://remenby31.github.io/autan/sdk/errors/#e0426"
     },
     "E0501": {
       "severity": "error",

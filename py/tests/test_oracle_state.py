@@ -164,16 +164,40 @@ def test_oracle_states_need_compressible_physics_without_turbulence_model(
     assert "E0414" in codes
 
 
+def _boundary(document: dict[str, Any], name: str) -> dict[str, Any]:
+    [boundary] = [b for b in document["boundaries"] if b["zone"] == name]
+    found: dict[str, Any] = boundary
+    return found
+
+
+def _borrow_states(document: dict[str, Any]) -> None:
+    # Another zone takes the farfield rule's states: its own rule gives none.
+    far = _boundary(document, "farfield")
+    _boundary(document, "fuselage").update(kind="oracle-state", states=far["states"])
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda d: _boundary(d, "farfield")["states"].update(sha256="0" * 64),
+        _borrow_states,
+        lambda d: _boundary(d, "farfield").update(rule=None),
+        lambda d: _boundary(d, "fuselage").update(rule=_boundary(d, "farfield")["rule"]),
+        lambda d: _boundary(d, "farfield").update(rule=99),
+    ],
+)
 def test_the_solver_input_states_are_those_of_the_case(
-    write_case: Callable[..., Path], two_faces: Path, capsys: pytest.CaptureFixture[str]
+    edit: Callable[[dict[str, Any]], None],
+    write_case: Callable[..., Path],
+    two_faces: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     case = oracle_case(write_case, states())
     assert main(["prepare", str(case), "--mesh-info", str(two_faces)]) == 0
     document = json.loads(capsys.readouterr().out)
     autan.solver_input.SolverInput.model_validate(document)
-    [boundary] = [b for b in document["boundaries"] if b["zone"] == "farfield"]
-    boundary["states"]["sha256"] = "0" * 64
-    with pytest.raises(ValueError, match="states"):
+    edit(document)
+    with pytest.raises(ValueError, match="boundary"):
         autan.solver_input.SolverInput.model_validate(document)
 
 

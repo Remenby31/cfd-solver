@@ -63,6 +63,20 @@ class Bounds(_Strict):
     max: Point
 
 
+GROUP_NAME = r"^[A-Za-z0-9_.][A-Za-z0-9_.-]*$"
+
+
+class Group(_Strict):
+    name: Annotated[str, Field(pattern=GROUP_NAME)]
+    zones: Annotated[tuple[Name, ...], Field(min_length=1)]
+
+
+class GroupsSource(_Strict):
+    path: Name
+    sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    provenance: dict[str, str]
+
+
 class BoundaryZone(_Strict):
     name: Name
     type: BoundaryType | None
@@ -143,6 +157,8 @@ class MeshInfo(_Strict):
     interfaces: tuple[Interface, ...]
     periodic: tuple[PeriodicPair, ...]
     quality: Quality
+    groups: tuple[Group, ...]
+    groups_source: GroupsSource | None
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
@@ -175,9 +191,29 @@ class MeshInfo(_Strict):
         if len(set(pairs)) != len(pairs):
             problems.append("interfaces lists a pair twice")
         problems += self._periodic_problems()
+        problems += self._group_problems()
         if problems:
             fail("E0202", "{problems}", problems="; ".join(problems))
         return self
+
+    def _group_problems(self) -> list[str]:
+        order = {zone.name: i for i, zone in enumerate(self.boundary_zones)}
+        names = [group.name for group in self.groups]
+        problems = []
+        if names != sorted(set(names)):
+            problems.append("groups are not sorted by distinct names")
+        if self.groups and self.groups_source is None:
+            problems.append("groups without groups_source")
+        for group in self.groups:
+            if not set(group.zones) <= order.keys():
+                problems.append(f"group {group.name!r} names an unknown boundary zone")
+            elif [order[z] for z in group.zones] != sorted({order[z] for z in group.zones}):
+                problems.append(f"group {group.name!r} does not list distinct zones in order")
+        return problems
+
+    def groups_of(self, zone: str) -> tuple[str, ...]:
+        """Names of the groups holding boundary zone ``zone``, in name order."""
+        return tuple(group.name for group in self.groups if zone in group.zones)
 
     def _periodic_problems(self) -> list[str]:
         faces = {zone.name: zone.faces for zone in self.boundary_zones}
@@ -234,9 +270,18 @@ class MeshInfo(_Strict):
         return self.model_dump(mode="json", by_alias=True)
 
 
+def mesh_location(path: Path) -> Path:
+    """The mesh a path names (mesh.md, Readers): a file, a polyMesh directory, or the
+    ``constant/polyMesh`` of an OpenFOAM case directory."""
+    case = path / "constant" / "polyMesh"
+    return case if path.is_dir() and case.is_dir() else path
+
+
 def mesh_sha256(path: Path) -> str:
-    """The mesh hash of a mesh file, or of a polyMesh directory (mesh-info.md, ``source.sha256``)."""
+    """The mesh hash of a mesh file, a polyMesh directory or an OpenFOAM case directory
+    (mesh-info.md, ``source.sha256``)."""
     digest = hashlib.sha256()
+    path = mesh_location(path)
     if path.is_dir():
         for name in POLYMESH_FILES:
             member = path / name

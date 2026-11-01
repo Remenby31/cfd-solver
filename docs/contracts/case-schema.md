@@ -157,7 +157,7 @@ Numerical settings (flux scheme, limiter, CFL ramp, linear solver) are not part 
 
 ### Boundaries
 
-A rule applies a condition to every boundary zone whose name matches `zones`, a glob pattern (`*`, `?`, `[…]`, case-sensitive, matched against the whole name).
+A rule applies a condition to every boundary zone whose name matches `zones`, a glob pattern (`*`, `?`, `[…]`, case-sensitive, matched against the whole name), or to the zones of the mesh's **zone groups** whose name matches `group`, a glob of the same kind: the union of their zones, each zone once. A rule gives exactly one of `zones` and `group` (`E0003`); a `group` that matches no group is `E0426`. Groups come from the `<mesh>.zones.json` next to the mesh file (symlinks followed), through its MeshInfo ([mesh-info.md](mesh-info.md)); they may overlap. `autan plan` checks that file against the MeshInfo like the mesh: `E0210` when its hash differs or it cannot be read, `W0211` when it is absent. Every other selection of boundary zones (`point_vortex.surfaces`, a monitor's `surfaces`) takes `group` instead in the same way. In Python: `case.boundary(group="wing.*").wall()`.
 
 | `condition.kind` | Keys | Physics |
 |---|---|---|

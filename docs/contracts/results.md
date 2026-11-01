@@ -29,7 +29,7 @@ The writer prepares the directory under a name starting with `.`, writes `run.js
   "identity": "4be1…",
   "status": "converged",
   "case": {"name": "crm-hl", "sha256": "…"},
-  "mesh": {"path": "/data/crm-hl.cgns", "sha256": "…"},
+  "mesh": {"path": "/data/crm-hl.cgns", "sha256": "…", "groups_sha256": null},
   "solver": {"version": "0.1.0", "commit": "d769576…", "backend": "fake"},
   "precision": "fp32+acc64",
   "deterministic": true,
@@ -50,10 +50,10 @@ The writer prepares the directory under a name starting with `.`, writes `run.js
 | Field | Meaning |
 |---|---|
 | `run_id` | Unique name of this execution and of its directory: `run-`, `started` as `YYYYMMDDThhmmssZ`, `-`, 8 random lowercase hex characters. |
-| `identity` | What the run computes: SHA-256 of `case.sha256`, `mesh.sha256`, `solver.commit`, `precision`, `solver.backend`, `devices.kind`, `devices.count` and, for a run with a `start`, `start.identity`, `start.mode`, `start.iterations`, `start.solution_sha256`, joined by `\n`, UTF-8. |
+| `identity` | What the run computes: SHA-256 of `case.sha256`, `mesh.sha256`, `mesh.groups_sha256` (the empty string for null), `solver.commit`, `precision`, `solver.backend`, `devices.kind`, `devices.count` and, for a run with a `start`, `start.identity`, `start.mode`, `start.iterations`, `start.solution_sha256`, joined by `\n`, UTF-8. |
 | `status` | `running` · `converged` (convergence criterion of [case-schema.md](case-schema.md#time) met) · `completed` (iteration or step budget reached without convergence, or every unsteady step done) · `stopped` (stopped by user code, signal or an execution cap) · `diverged` (carries a `D` diagnostic) · `failed` (carries `E0704`). |
 | `case.sha256` | Case hash as defined in [case-schema.md](case-schema.md#case-hash). |
-| `mesh.path`, `mesh.sha256` | Absolute path of the mesh read, and `source.sha256` of its MeshInfo. |
+| `mesh.path`, `mesh.sha256`, `mesh.groups_sha256` | Absolute path of the mesh read, `source.sha256` of its MeshInfo, and `groups_source.sha256` of its MeshInfo, null without zone groups: the zones a case's `group` selected. |
 | `solver.version`, `solver.commit` | Version and full 40-character git commit of the solver build. |
 | `solver.backend` | `cuda` · `hip` · `cpu` · `fake`. Results of the `fake` backend are synthetic and must never be used as reference data. |
 | `precision` | Precision as run, from the case. |

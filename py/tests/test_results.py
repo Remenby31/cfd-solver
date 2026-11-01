@@ -68,6 +68,7 @@ def test_run_directory_and_metadata_follow_the_contract(crm_run: autan.Results) 
     parts = [
         run["case"]["sha256"],
         run["mesh"]["sha256"],
+        run["mesh"]["groups_sha256"] or "",
         run["solver"]["commit"],
         run["precision"],
         "fake",

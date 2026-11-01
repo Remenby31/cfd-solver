@@ -27,7 +27,7 @@ export interface Run {
   identity: string;
   status: RunStatus;
   case: { name: string; sha256: string };
-  mesh: { path: string; sha256: string };
+  mesh: { path: string; sha256: string; groups_sha256: string | null };
   solver: { version: string; commit: string; backend: "cuda" | "hip" | "cpu" | "fake" };
   precision: "fp32+acc64" | "fp64";
   deterministic: boolean;

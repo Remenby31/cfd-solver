@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from autan import face_states, initial_state
-from autan.errors import Diagnostic, diagnostic
-from autan.meshinfo import mesh_sha256
+from autan.errors import Diagnostic, Location, diagnostic
+from autan.meshinfo import mesh_location, mesh_sha256
 from autan.schema import (
     DDES,
     SA,
@@ -35,6 +35,7 @@ from autan.schema import (
     Inviscid,
     Laminar,
     OracleState,
+    PointVortex,
     Slip,
     SolidZone,
     StateFile,
@@ -180,6 +181,7 @@ def plan(case: Case, mesh: MeshInfo, *, gpus: int = 1) -> Plan:
                 mesh=str(mesh_file),
             )
         )
+    _check_groups_file(case, mesh, found)
     worst = mesh.quality.max_non_orthogonality_deg
     if worst > NON_ORTHOGONALITY_WARNING_DEG:
         found.append(
@@ -229,8 +231,80 @@ def plan(case: Case, mesh: MeshInfo, *, gpus: int = 1) -> Plan:
     )
 
 
+def groups_file(mesh_file: Path) -> Path:
+    """The zone groups file of a mesh: ``<mesh file or polyMesh directory>.zones.json`` next
+    to it, symlinks followed, as the runtime finds it from the solver input's path."""
+    mesh = mesh_location(mesh_file).resolve()
+    return mesh.parent / f"{mesh.name}.zones.json"
+
+
+def _check_groups_file(case: Case, mesh: MeshInfo, found: list[Diagnostic]) -> None:
+    path = groups_file(case.mesh_path)
+    source = mesh.groups_source
+    if os.path.lexists(path):  # a dangling link is there but unreadable, not absent
+        try:
+            digest: str | None = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            digest = None
+        if source is None or digest != source.sha256:
+            found.append(
+                diagnostic(
+                    "E0210",
+                    f"the MeshInfo's zone groups differ from {str(path)!r}"
+                    + ("" if digest else ", which cannot be read"),
+                    location=case.locate("mesh"),
+                    groups=str(path),
+                )
+            )
+    elif source is not None:
+        found.append(
+            diagnostic(
+                "W0211",
+                f"zone groups file {str(path)!r} not found; the MeshInfo's groups are taken "
+                "as given",
+                location=case.locate("mesh"),
+                groups=str(path),
+            )
+        )
+
+
 def _matches(pattern: str, names: list[str]) -> list[str]:
     return [name for name in names if fnmatchcase(name, pattern)]
+
+
+def selected(zones: str | None, group: str | None, mesh: MeshInfo) -> list[str]:
+    """The non-periodic boundary zones a selection takes, in MeshInfo order: those matching
+    the glob ``zones``, or every zone of the groups whose name matches the glob ``group``."""
+    partners = _partners(mesh)
+    names = [zone.name for zone in mesh.boundary_zones if zone.name not in partners]
+    if zones is not None:
+        return _matches(zones, names)
+    assert group is not None
+    chosen = {z for g in mesh.groups if fnmatchcase(g.name, group) for z in g.zones}
+    return [name for name in names if name in chosen]
+
+
+def _unknown_group(
+    group: str | None, mesh: MeshInfo, location: Location, found: list[Diagnostic]
+) -> bool:
+    """Report E0426 when ``group`` matches no group of the mesh."""
+    if group is None or any(fnmatchcase(g.name, group) for g in mesh.groups):
+        return False
+    known = ", ".join(g.name for g in mesh.groups) or "none: the mesh has no zones.json"
+    found.append(
+        diagnostic(
+            "E0426",
+            f"group {group!r} matches no zone group of the mesh",
+            location=location,
+            fix=f"Use one of the mesh's groups: {known}.",
+            group=group,
+        )
+    )
+    return True
+
+
+def _label(zones: str | None, group: str | None) -> str:
+    return repr(zones) if zones is not None else f"group {group!r}"
 
 
 def _check_manufactured(case: Case, spec: CaseSpec, found: list[Diagnostic]) -> None:
@@ -359,7 +433,14 @@ def _resolve_boundaries(
     owner: dict[str, int] = {}
     for index, rule in enumerate(spec.boundaries):
         where = case.locate(f"boundaries[{index}]")
-        if rule.zones in partners and not any(c in rule.zones for c in "*?["):
+        if _unknown_group(rule.group, mesh, where, found):
+            _check_condition(case, spec, index, found)
+            continue
+        if (
+            rule.zones is not None
+            and rule.zones in partners
+            and not any(c in rule.zones for c in "*?[")
+        ):
             found.append(
                 diagnostic(
                     "E0424",
@@ -370,14 +451,15 @@ def _resolve_boundaries(
                 )
             )
             continue
-        matched = _matches(rule.zones, names)
+        matched = selected(rule.zones, rule.group, mesh)
         if not matched:
             found.append(
                 diagnostic(
                     "E0410",
-                    f"boundary pattern {rule.zones!r} matches no zone (zones: {', '.join(names)})",
+                    f"boundary selection {_label(rule.zones, rule.group)} matches no zone "
+                    f"(zones: {', '.join(names)})",
                     location=where,
-                    pattern=rule.zones,
+                    pattern=rule.zones if rule.zones is not None else rule.group,
                 )
             )
         for name in matched:
@@ -386,7 +468,8 @@ def _resolve_boundaries(
                     diagnostic(
                         "E0411",
                         f"boundary zone {name!r} is matched by rules "
-                        f"{spec.boundaries[owner[name]].zones!r} and {rule.zones!r}",
+                        f"{_label(spec.boundaries[owner[name]].zones, spec.boundaries[owner[name]].group)}"
+                        f" and {_label(rule.zones, rule.group)}",
                         location=where,
                         zone=name,
                     )
@@ -705,14 +788,12 @@ def _properties(material: dict[str, Any]) -> dict[str, Any]:
 
 
 def vortex_zones(
-    pattern: str, mesh: MeshInfo, boundaries: tuple[BoundaryResolution, ...] | list[Any]
+    vortex: PointVortex, mesh: MeshInfo, boundaries: tuple[BoundaryResolution, ...] | list[Any]
 ) -> tuple[list[str], list[str]]:
-    """The zones a point vortex's ``surfaces`` matches (periodic zones skipped), and those of
-    them that are not wall or slip zones."""
-    partners = _partners(mesh)
-    names = [zone.name for zone in mesh.boundary_zones if zone.name not in partners]
+    """The zones a point vortex selects (periodic zones skipped), and those of them that are
+    not wall or slip zones."""
     kinds = {b.zone: (b.condition or {}).get("kind") for b in boundaries}
-    matched = _matches(pattern, names)
+    matched = selected(vortex.surfaces, vortex.group, mesh)
     return matched, [z for z in matched if kinds.get(z) not in ("wall", "slip")]
 
 
@@ -728,12 +809,15 @@ def _check_point_vortices(
         vortex = rule.condition.point_vortex if isinstance(rule.condition, Farfield) else None
         if vortex is None:
             continue
-        matched, others = vortex_zones(vortex.surfaces, mesh, boundaries)
-        literal = not any(c in vortex.surfaces for c in "*?[")
-        if literal and vortex.surfaces in partners:
-            problem = f"zone {vortex.surfaces!r} is periodic"
+        where = case.locate(f"boundaries[{index}].condition.point_vortex")
+        if _unknown_group(vortex.group, mesh, where, found):
+            continue
+        matched, others = vortex_zones(vortex, mesh, boundaries)
+        surfaces = vortex.surfaces
+        if surfaces is not None and surfaces in partners and not any(c in surfaces for c in "*?["):
+            problem = f"zone {surfaces!r} is periodic"
         elif not matched:
-            problem = f"{vortex.surfaces!r} matches no boundary zone"
+            problem = f"{_label(surfaces, vortex.group)} matches no boundary zone"
         elif others:
             problem = f"it matches zones that are not wall or slip: {', '.join(others)}"
         else:
@@ -742,19 +826,23 @@ def _check_point_vortices(
             diagnostic(
                 "E0425",
                 f"point vortex of boundaries[{index}]: {problem}",
-                location=case.locate(f"boundaries[{index}].condition.point_vortex"),
-                surfaces=vortex.surfaces,
+                location=where,
+                surfaces=surfaces if surfaces is not None else vortex.group,
             )
         )
 
 
 def _check_monitors(case: Case, spec: CaseSpec, mesh: MeshInfo, found: list[Diagnostic]) -> None:
     partners = _partners(mesh)
-    names = [zone.name for zone in mesh.boundary_zones if zone.name not in partners]
     seen: set[str] = set()
     for index, monitor in enumerate(spec.monitors):
         where = case.locate(f"monitors[{index}]")
-        if monitor.surfaces in partners and not any(c in monitor.surfaces for c in "*?["):
+        surfaces = monitor.surfaces
+        if _unknown_group(monitor.group, mesh, where, found):
+            pass
+        elif (
+            surfaces is not None and surfaces in partners and not any(c in surfaces for c in "*?[")
+        ):
             found.append(
                 diagnostic(
                     "E0603",
@@ -765,11 +853,11 @@ def _check_monitors(case: Case, spec: CaseSpec, mesh: MeshInfo, found: list[Diag
                     zone=monitor.surfaces,
                 )
             )
-        elif not _matches(monitor.surfaces, names):
+        elif not selected(surfaces, monitor.group, mesh):
             found.append(
                 diagnostic(
                     "E0601",
-                    f"monitor {monitor.name!r}: surfaces {monitor.surfaces!r} match no "
+                    f"monitor {monitor.name!r}: {_label(surfaces, monitor.group)} matches no "
                     "boundary zone",
                     location=where,
                     monitor=monitor.name,

@@ -198,6 +198,14 @@ def co2_viscosity_in_base_units(case: autan.Case) -> None:
     case.cell_zone("co2").fluid(autan.IdealGas(**gas))
 
 
+def group_selectors(case: autan.Case) -> None:
+    case.boundary(group="WING").wall()
+    case.boundary("farfield").farfield(
+        point_vortex=autan.PointVortex(group="wing.*", center=(Q(0, "m"),) * 3)
+    )
+    case.monitor(autan.forces(group="wing.*", name="wing"), every=2)
+
+
 # Cases built in Python whose values the canonical form must keep as the document writes them:
 # units autan.units does not export, values equal to a default or a library material in another
 # unit or sign, characters a Python string must escape, calls too long for one line.
@@ -224,6 +232,7 @@ EDGES: dict[str, Callable[[autan.Case], None]] = {
     "library-units": co2_viscosity_in_base_units,
     "long-zone": lambda case: case.boundary("w" * 80).wall(),
     "empty-call-at-the-width": lambda case: case.boundary("w" * 77).wall(),
+    "group-selectors": group_selectors,
     "long-zone-arguments": lambda case: case.boundary("w" * 80).wall(temperature=Q(400, "K")),
     "long-zone-long-arguments": lambda case: case.cell_zone("w" * 80).fluid(
         autan.gases.AIR,

@@ -216,9 +216,10 @@ class Case:
         self._freestream = Freestream(**given)
         self._locations["freestream"] = _caller_location()
 
-    def boundary(self, zones: str) -> BoundarySelector:
-        """Select boundary zones by glob pattern; call a condition method on the result."""
-        return BoundarySelector(self, zones)
+    def boundary(self, zones: str | None = None, *, group: str | None = None) -> BoundarySelector:
+        """Select boundary zones by a glob over their names, or by ``group``, a glob over the
+        mesh's zone group names; call a condition method on the result."""
+        return BoundarySelector(self, zones, group)
 
     def cell_zone(self, zones: str) -> CellZoneSelector:
         """Select cell zones by glob pattern; call ``fluid`` or ``solid`` on the result."""
@@ -366,11 +367,13 @@ class Case:
 class BoundarySelector:
     """The boundary zones matching a pattern; each method adds one rule to the case."""
 
-    def __init__(self, case: Case, zones: str) -> None:
-        self._case, self._zones = case, zones
+    def __init__(self, case: Case, zones: str | None, group: str | None) -> None:
+        self._case, self._zones, self._group = case, zones, group
 
     def _add(self, condition: Any) -> None:
-        self._case._add_boundary(BoundaryRule(zones=self._zones, condition=condition))
+        self._case._add_boundary(
+            BoundaryRule(zones=self._zones, group=self._group, condition=condition)
+        )
 
     def wall(self, *, temperature: QuantityLike | None = None) -> None:
         """No-slip wall, adiabatic unless ``temperature`` is given."""
@@ -429,14 +432,16 @@ class CellZoneSelector:
 
 
 def forces(
-    surfaces: str,
+    surfaces: str | None = None,
     *,
+    group: str | None = None,
     name: str = "forces",
     ref_area: QuantityLike | None = None,
     moment_center: tuple[QuantityLike, QuantityLike, QuantityLike] | None = None,
 ) -> Forces:
-    """A forces monitor over the boundary zones matching ``surfaces``."""
-    given: dict[str, Any] = {"surfaces": surfaces, "name": name}
+    """A forces monitor over the boundary zones matching ``surfaces``, or the zones of the
+    groups matching ``group``."""
+    given: dict[str, Any] = {"surfaces": surfaces, "group": group, "name": name}
     if ref_area is not None:
         given["ref_area"] = ref_area
     if moment_center is not None:

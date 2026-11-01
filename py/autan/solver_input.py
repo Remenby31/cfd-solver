@@ -131,6 +131,7 @@ class MeshRef(_Strict):
     path: AbsolutePath
     sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$", min_length=64, max_length=64)]
     scale: Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
+    groups_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None
 
 
 class SutherlandLaw(_Strict):
@@ -245,6 +246,7 @@ class BoundaryInput(_Strict):
     static_pressure: Positive | None
     states: StatesRef | None
     point_vortex: PointVortexInput | None
+    rule: Annotated[int, Field(strict=True, ge=0)] | None
 
     @model_validator(mode="after")
     def _values_match_kind(self) -> Self:
@@ -349,6 +351,33 @@ class StartInput(_Strict):
         return self
 
 
+def _rule_problem(boundary: BoundaryInput, case: CaseSpec) -> str | None:
+    """How ``boundary`` disagrees with the case rule it names (a group's zones need the
+    MeshInfo; a glob over zone names is checked here)."""
+    globbed = [
+        i
+        for i, r in enumerate(case.boundaries)
+        if r.zones is not None and fnmatchcase(boundary.zone, r.zones)
+    ]
+    if boundary.rule is None:
+        if globbed or boundary.states is not None:
+            return "takes no rule of the case, yet a rule selects it or it has states"
+        return None
+    if boundary.rule >= len(case.boundaries):
+        return f"rule {boundary.rule} is not a rule of the case"
+    rule = case.boundaries[boundary.rule]
+    if rule.zones is not None and boundary.rule not in globbed:
+        return f"rule {boundary.rule} does not select it"
+    if rule.group is None and globbed != [boundary.rule]:
+        return "another rule selects it"
+    if boundary.kind != rule.condition.kind:
+        return f"its kind is not that of rule {boundary.rule}"
+    named = rule.condition.sha256 if isinstance(rule.condition, OracleState) else None
+    if (boundary.states.sha256 if boundary.states else None) != named:
+        return "its states differ from the case's rule"
+    return None
+
+
 class SolverInput(_Strict):
     """The input document of ``autan-run`` (docs/contracts/solver-input.md); SI throughout."""
 
@@ -433,10 +462,9 @@ class SolverInput(_Strict):
             message = "oracle-state needs compressible inviscid or laminar physics"
             raise ValueError(message)
         for boundary in self.boundaries:
-            rules = [r.condition for r in case.boundaries if fnmatchcase(boundary.zone, r.zones)]
-            oracle = rules[0] if len(rules) == 1 and isinstance(rules[0], OracleState) else None
-            if (boundary.states and boundary.states.sha256) != (oracle and oracle.sha256):
-                message = f"boundary {boundary.zone!r}: states differ from the case's rule"
+            problem = _rule_problem(boundary, case)
+            if problem:
+                message = f"boundary {boundary.zone!r}: {problem}"
                 raise ValueError(message)
         manufactured = {b.kind == "manufactured" for b in self.boundaries}
         if manufactured and manufactured != {self.verification is not None}:
@@ -667,7 +695,7 @@ def _point_vortex(
     vortex = rule.condition.point_vortex if rule and isinstance(rule.condition, Farfield) else None
     if vortex is None:
         return None
-    zones, _ = vortex_zones(vortex.surfaces, mesh_info, plan.boundaries)
+    zones, _ = vortex_zones(vortex, mesh_info, plan.boundaries)
     return PointVortexInput(
         zones=tuple(zones),
         center=(si(vortex.center[0], "m"), si(vortex.center[1], "m"), si(vortex.center[2], "m")),
@@ -707,6 +735,7 @@ def build(
                     else None
                 ),
                 point_vortex=_point_vortex(spec, resolution, mesh_info, plan),
+                rule=resolution.rule,
             )
         )
     freestream, turbulence = freestream_state(spec), turbulence_input(spec)
@@ -719,14 +748,14 @@ def build(
         )
         for zone, rule in media
     )
-    periodic = {zone for pair in mesh_info.periodic for zone in pair.zones}
-    zone_names = [b.zone for b in plan.boundaries if b.zone not in periodic]
+    from autan.plan import selected  # noqa: PLC0415 -- plan imports this module
+
     monitors = tuple(
         ForcesInput(
             kind="forces",
             name=m.name,
             every=m.every,
-            zones=tuple(n for n in zone_names if fnmatchcase(n, m.surfaces)),
+            zones=tuple(selected(m.surfaces, m.group, mesh_info)),
             ref_area=si(m.ref_area, "m**2") if m.ref_area is not None else None,
             ref_length=(
                 si(spec.freestream.ref_length, "m")
@@ -763,6 +792,7 @@ def build(
             path=str(case.mesh_path),
             sha256=mesh_info.source.sha256,
             scale=metres_per(spec.mesh_unit),
+            groups_sha256=mesh_info.groups_source.sha256 if mesh_info.groups_source else None,
         ),
         precision=spec.physics.precision,
         deterministic=deterministic,

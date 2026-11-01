@@ -672,7 +672,32 @@ Prepared prepare(const fs::path& input_file, const PhysicsRegistry& registry, in
   }
   // solver-input.md, mesh.scale: the coordinates and periodic translations in
   // metres once checked against the file, before any geometry or pairing.
-  p.mesh_info = io::mesh_info_json(p.mesh, p.mesh_hash);
+  // The run archives the zone groups the case was resolved with: the sidecar
+  // must be the one the SDK hashed (solver-input.md, mesh.groups_sha256).
+  std::optional<io::ZoneGroups> groups;
+  try {
+    groups = io::read_zone_groups(p.input.mesh_path, p.mesh, p.mesh_hash);
+  } catch (const Error& e) {
+    throw InputError(Diagnostic{.code = error_code_string(e.code()),
+                                .message = e.what(),
+                                .path = "mesh.groups_sha256",
+                                .data_json = "{}"});
+  }
+  const std::optional<std::string> found =
+      groups ? std::optional<std::string>(groups->sha256) : std::nullopt;
+  if (found != p.input.mesh_groups_sha256) {
+    const auto text = [](const std::optional<std::string>& s) {
+      return s ? nlohmann::json(*s) : nlohmann::json(nullptr);
+    };
+    throw InputError(Diagnostic{
+        .code = "E0137",
+        .message = "the mesh's zone-groups file is not the one mesh.groups_sha256 names",
+        .path = "mesh.groups_sha256",
+        .data_json =
+            nlohmann::json{{"expected", text(p.input.mesh_groups_sha256)}, {"found", text(found)}}
+                .dump()});
+  }
+  p.mesh_info = io::mesh_info_json(p.mesh, p.mesh_hash, groups);
   if (p.input.mesh_scale != 1.0) p.mesh = scaled(p.mesh, p.input.mesh_scale);
   if (p.input.start) load_start(p);
   if (p.input.verification) {
@@ -876,7 +901,8 @@ class Run final : public Log {
     const std::string started_at = comm_.broadcast(utc(started, "%Y-%m-%dT%H:%M:%SZ"));
     const auto& in = p_.input;
     const std::string backend = in.device_kind;
-    std::string parts = in.case_sha256 + "\n" + p_.mesh_hash + "\n" + build.commit + "\n" +
+    std::string parts = in.case_sha256 + "\n" + p_.mesh_hash + "\n" +
+                        in.mesh_groups_sha256.value_or("") + "\n" + build.commit + "\n" +
                         in.precision + "\n" + backend + "\n" + in.device_kind + "\n" +
                         std::to_string(in.device_count);
     Json start = nullptr;
@@ -909,7 +935,8 @@ class Run final : public Log {
         {"case", {{"name", in.case_name}, {"sha256", in.case_sha256}}},
         {"mesh",
          {{"path", fs::absolute(in.mesh_path).lexically_normal().string()},
-          {"sha256", p_.mesh_hash}}},
+          {"sha256", p_.mesh_hash},
+          {"groups_sha256", in.mesh_groups_sha256 ? Json(*in.mesh_groups_sha256) : Json(nullptr)}}},
         {"solver", {{"version", build.version}, {"commit", build.commit}, {"backend", backend}}},
         {"precision", in.precision},
         {"deterministic", in.deterministic},

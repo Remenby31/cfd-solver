@@ -53,6 +53,7 @@ def test_continue_extends_the_run_as_if_it_never_stopped(
     parts = [
         run.case.sha256,
         run.mesh.sha256,
+        run.mesh.groups_sha256 or "",
         run.solver.commit,
         run.precision,
         run.solver.backend,

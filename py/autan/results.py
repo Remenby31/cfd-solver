@@ -44,6 +44,7 @@ class CaseIdentity(_Strict):
 class MeshIdentity(_Strict):
     path: str
     sha256: Hex
+    groups_sha256: Hex | None
 
 
 class Solver(_Strict):
@@ -177,13 +178,15 @@ def iso(moment: datetime) -> str:
 def identity(
     case: str,
     mesh: str,
+    groups: str | None,
     solver: Solver,
     precision: str,
     devices: Devices,
     start: StartInfo | None = None,
 ) -> str:
     """The reproducibility fingerprint of a run (results.md, ``identity``)."""
-    parts = [case, mesh, solver.commit, precision, solver.backend, devices.kind, str(devices.count)]
+    parts = [case, mesh, groups or ""]
+    parts += [solver.commit, precision, solver.backend, devices.kind, str(devices.count)]
     if start is not None:
         parts += [start.identity, start.mode, str(start.iterations), start.solution_sha256]
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
@@ -664,8 +667,15 @@ def run_problems(run: RunInfo, case: CaseSpec, mesh_info: MeshInfo) -> list[str]
         found.append("finished must be null exactly while running")
     if run.finished is not None and not _TIMESTAMP.fullmatch(run.finished):
         found.append(f"finished {run.finished!r} is not a UTC ISO 8601 timestamp")
+    groups = mesh_info.groups_source.sha256 if mesh_info.groups_source else None
     expected = identity(
-        case.hash(), mesh_info.source.sha256, run.solver, run.precision, run.devices, run.start
+        case.hash(),
+        mesh_info.source.sha256,
+        groups,
+        run.solver,
+        run.precision,
+        run.devices,
+        run.start,
     )
     if run.identity != expected:
         found.append("identity does not match its definition")
@@ -673,6 +683,8 @@ def run_problems(run: RunInfo, case: CaseSpec, mesh_info: MeshInfo) -> list[str]
         found.append("case.toml does not match run.json case")
     if mesh_info.source.sha256 != run.mesh.sha256:
         found.append("mesh-info.json does not match run.json mesh.sha256")
+    if groups != run.mesh.groups_sha256:
+        found.append("mesh-info.json groups_source does not match run.json mesh.groups_sha256")
     if not Path(run.mesh.path).is_absolute():
         found.append("mesh.path must be absolute")
     if run.precision != case.physics.precision:

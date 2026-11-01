@@ -77,6 +77,8 @@
   ],
   "interfaces": [],
   "periodic": [],
+  "groups": [],
+  "groups_source": null,
   "quality": {
     "max_non_orthogonality_deg": 36.6992252004899,
     "max_faces_per_cell": 6

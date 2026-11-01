@@ -8,7 +8,8 @@
   "mesh": {
     "path": "@MESH@",
     "sha256": "0edcff657743a2a039ab7814e7f9f276bc5631530bc3adf519abe6dcb290ebe6",
-    "scale": 1.0
+    "scale": 1.0,
+    "groups_sha256": null
   },
   "precision": "fp32+acc64",
   "deterministic": false,
@@ -50,6 +51,7 @@
   "boundaries": [
     {
       "zone": "xmin",
+      "rule": 2,
       "kind": "farfield",
       "temperature": null,
       "total_pressure": null,
@@ -61,6 +63,7 @@
     },
     {
       "zone": "xmax",
+      "rule": 3,
       "kind": "farfield",
       "temperature": null,
       "total_pressure": null,
@@ -72,6 +75,7 @@
     },
     {
       "zone": "ymin",
+      "rule": 0,
       "kind": "wall",
       "temperature": null,
       "total_pressure": null,
@@ -83,6 +87,7 @@
     },
     {
       "zone": "ymax",
+      "rule": 4,
       "kind": "farfield",
       "temperature": null,
       "total_pressure": null,
@@ -94,6 +99,7 @@
     },
     {
       "zone": "zmin",
+      "rule": 5,
       "kind": "farfield",
       "temperature": null,
       "total_pressure": null,
@@ -105,6 +111,7 @@
     },
     {
       "zone": "zmax",
+      "rule": 1,
       "kind": "symmetry",
       "temperature": null,
       "total_pressure": null,

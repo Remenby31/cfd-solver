@@ -5,6 +5,9 @@
 #include <cstdint>
 #include <fstream>
 #include <map>
+#include <optional>
+#include <regex>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -145,7 +148,129 @@ std::string mesh_hash(const fs::path& path) {
   return picosha2::get_hash_hex_string(hasher);
 }
 
-std::string mesh_info_json(const Mesh& mesh, const std::string& sha256) {
+std::optional<ZoneGroups> read_zone_groups(const fs::path& mesh_path, const Mesh& mesh,
+                                           const std::string& sha256) {
+  // Next to the mesh file itself, symlinks followed (case-schema.md), so the
+  // SDK and the runtime read the same sidecar; for an OpenFOAM case
+  // directory, next to its polyMesh directory.
+  std::error_code ec;
+  const fs::path given =
+      fs::is_directory(mesh_path, ec) ? polymesh_directory(mesh_path) : mesh_path;
+  const fs::path resolved = fs::canonical(given, ec);
+  const fs::path path = (ec ? given.lexically_normal() : resolved).string() + ".zones.json";
+  // Absent only when nothing is there: a link to nothing or an error is unreadable.
+  const auto entry = fs::symlink_status(path, ec);
+  if (ec && ec != std::errc::no_such_file_or_directory) {
+    throw Error(ErrorCode::zone_groups_invalid, path.string() + ": " + ec.message());
+  }
+  if (!fs::exists(entry)) return std::nullopt;
+  if (!fs::is_regular_file(path, ec)) {
+    throw Error(ErrorCode::zone_groups_invalid, path.string() + ": not a readable file");
+  }
+  const auto invalid = [&](ErrorCode code, const std::string& why) -> Error {
+    return {code, path.string() + ": " + why};
+  };
+  const std::ifstream in(path, std::ios::binary);
+  std::ostringstream bytes;
+  bytes << in.rdbuf();
+  if (!in && !in.eof()) throw invalid(ErrorCode::zone_groups_invalid, "cannot be read");
+  const std::string text = bytes.str();
+
+  // Duplicate keys, which a JSON parser would merge silently: a group name
+  // twice is E0139, any other key twice breaks the schema.
+  std::vector<std::vector<std::string>> keys;
+  std::string root_key;
+  bool duplicate_group = false, duplicate_other = false;
+  const auto watch = [&](int depth, nlohmann::json::parse_event_t event, nlohmann::json& parsed) {
+    using E = nlohmann::json::parse_event_t;
+    if (event == E::object_start) keys.emplace_back();
+    if (event == E::object_end) keys.pop_back();
+    if (event == E::key) {
+      const std::string key = parsed.get<std::string>();
+      if (depth == 1) root_key = key;
+      auto& seen = keys.back();
+      if (std::ranges::find(seen, key) != seen.end()) {
+        (depth == 2 && root_key == "groups" ? duplicate_group : duplicate_other) = true;
+      }
+      seen.push_back(key);
+    }
+    return true;
+  };
+  nlohmann::json doc;
+  try {
+    doc = nlohmann::json::parse(text, watch);
+  } catch (const nlohmann::json::exception& e) {
+    throw invalid(ErrorCode::zone_groups_invalid, std::string("not JSON: ") + e.what());
+  }
+  if (duplicate_other) throw invalid(ErrorCode::zone_groups_invalid, "a key is given twice");
+  if (duplicate_group)
+    throw invalid(ErrorCode::zone_groups_duplicate_name, "a group is given twice");
+  const auto schema = [&](const std::string& why) {
+    throw invalid(ErrorCode::zone_groups_invalid, why);
+  };
+  if (!doc.is_object()) schema("not an object");
+  for (const auto& [key, value] : doc.items()) {
+    if (key != "schema" && key != "mesh_sha256" && key != "provenance" && key != "groups")
+      schema("unknown key '" + key + "'");
+  }
+  for (const char* key : {"schema", "mesh_sha256", "provenance", "groups"}) {
+    if (!doc.contains(key)) schema(std::string("no '") + key + "'");
+  }
+  if (doc["schema"] != "autan.zone-groups/1") schema("schema is not autan.zone-groups/1");
+  if (!doc["mesh_sha256"].is_string()) schema("mesh_sha256 is not a string");
+  if (doc["mesh_sha256"].get<std::string>() != sha256) {
+    throw invalid(
+        ErrorCode::zone_groups_other_mesh,
+        "mesh_sha256 " + doc["mesh_sha256"].get<std::string>() + " is not the mesh's " + sha256);
+  }
+  if (!doc["provenance"].is_object()) schema("provenance is not an object");
+  if (!doc["groups"].is_object()) schema("groups is not an object");
+
+  ZoneGroups out;
+  out.path = path.string();
+  out.sha256 = picosha2::hash256_hex_string(text);
+  for (const auto& [key, value] : doc["provenance"].items()) {
+    if (!value.is_string()) schema("provenance '" + key + "' is not a string");
+    out.provenance.emplace_back(key, value.get<std::string>());
+  }
+  std::map<std::string, std::size_t> order;  // boundary zone name -> MeshInfo position
+  const MeshInfoZones zones = meshinfo_zones(mesh);
+  for (std::size_t k = 0; k < zones.boundary.size(); ++k)
+    order[mesh.face_zones()[at(zones.boundary[k])].name] = k;
+  const std::regex name("[A-Za-z0-9_.][A-Za-z0-9_.-]*");
+  for (const auto& [group, members] : doc["groups"].items()) {
+    const auto bad = [&](const std::string& why) {
+      std::string message = "group '";
+      message += group;
+      message += "': ";
+      message += why;
+      throw invalid(ErrorCode::zone_groups_bad_group, message);
+    };
+    if (!std::regex_match(group, name)) bad("not a valid name");
+    if (!members.is_array()) schema("group '" + group + "' is not a list");
+    if (members.empty()) bad("empty");
+    std::vector<std::pair<std::size_t, std::string>> found;
+    for (const auto& zone : members) {
+      if (!zone.is_string()) schema("group '" + group + "' lists a non-string");
+      const auto it = order.find(zone.get<std::string>());
+      if (it == order.end()) bad("no boundary zone '" + zone.get<std::string>() + "'");
+      if (std::ranges::find(found, it->second, &std::pair<std::size_t, std::string>::first) !=
+          found.end())
+        bad("zone '" + it->first + "' listed twice");
+      found.emplace_back(it->second, it->first);
+    }
+    std::ranges::sort(found);
+    std::vector<std::string> names;
+    names.reserve(found.size());
+    for (const auto& [k, zone] : found) names.push_back(zone);
+    out.groups.emplace_back(group, std::move(names));
+  }
+  std::ranges::sort(out.groups);
+  return out;
+}
+
+std::string mesh_info_json(const Mesh& mesh, const std::string& sha256,
+                           const std::optional<ZoneGroups>& groups) {
   if (mesh.n_owned_cells() != mesh.n_cells()) {
     throw Error(ErrorCode::mesh_inconsistent_sizes, "MeshInfo describes an unpartitioned mesh");
   }
@@ -209,6 +334,15 @@ std::string mesh_info_json(const Mesh& mesh, const std::string& sha256) {
              {"faces", offsets[at(pair.zone_a) + 1] - offsets[at(pair.zone_a)]}});
   }
 
+  Json group_list = Json::array();
+  Json source = nullptr;
+  if (groups) {
+    for (const auto& [name, zones_of] : groups->groups)
+      group_list.push_back(Json{{"name", name}, {"zones", zones_of}});
+    Json provenance = Json::object();
+    for (const auto& [key, value] : groups->provenance) provenance[key] = value;
+    source = Json{{"path", groups->path}, {"sha256", groups->sha256}, {"provenance", provenance}};
+  }
   const double max_angle = *std::ranges::max_element(quality.non_orthogonality);
   const auto [x_low, x_high] = std::ranges::minmax(mesh.x());
   const auto [y_low, y_high] = std::ranges::minmax(mesh.y());
@@ -232,6 +366,8 @@ std::string mesh_info_json(const Mesh& mesh, const std::string& sha256) {
       {"cell_zones", cell_zones},
       {"interfaces", interfaces},
       {"periodic", periodic},
+      {"groups", group_list},
+      {"groups_source", source},
       {"quality", {{"max_non_orthogonality_deg", max_angle}, {"max_faces_per_cell", max_faces}}},
   };
   return doc.dump(2);

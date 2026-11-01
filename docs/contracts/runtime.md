@@ -40,6 +40,8 @@ The ranks stop together after a signal reaches any of them, and report the least
 
 An exception from any member ends the run as `failed` with `E0704`. A report with a diverged cell or a non-finite residual ends it as `diverged` with `D0107`; the solution is then written only if every field is finite.
 
+The run directory's `mesh-info.json` is the MeshInfo of the mesh as read, before `mesh.scale`, with the zone groups of its sidecar ([mesh-info.md](mesh-info.md#zone-groups)). The runtime reads the sidecar for that alone (the input is resolved per zone) and refuses, before any directory exists, a sidecar whose hash is not `mesh.groups_sha256`, or one present when it is `null` or absent when it is not (`E0137`).
+
 ## Start
 
 For an input with a `start` ([solver-input.md](solver-input.md)), the runtime checks the previous `solution.cgns` against `start.solution_sha256` (`E0709`), reads it (`E0707` if it cannot), and checks its mesh (`E0203`), precision and fields (`E0708`). All of this happens before any directory exists. `PhysicsContext::start` then holds its `FlowSolution` and, for `continue`, its `FlowSolutionMean` and `RestartState`. The physics starts from those instead of `initial`. For `warm` it takes the fields only. A `continue` calls `step` from `start.iterations + 1`. The runtime carries on the physical time and the averaging interval, and measures steady convergence against `start.residual_reference`. A physics whose `restart_fields` round-trips its whole state makes the continued run reproduce the uninterrupted one: same history lines and same solution arrays.

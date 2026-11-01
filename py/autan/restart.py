@@ -68,7 +68,16 @@ def problems(
     if run.mesh.sha256 != mesh_info.source.sha256:
         found.append(problem("E0203", f"run {run.run_id} was computed on another mesh"))
     old = previous.case
+    groups = mesh_info.groups_source.sha256 if mesh_info.groups_source else None
     if mode == "continue":
+        if run.mesh.groups_sha256 != groups:
+            found.append(
+                problem(
+                    "E0708",
+                    f"run {run.run_id} resolved its zone groups from another zones.json; "
+                    "continue needs the same boundary conditions",
+                )
+            )
         if _without_budget(old) != _without_budget(spec):
             found.append(
                 problem(
