@@ -482,10 +482,11 @@ SolverInput parse_solver_input(const std::string& text) {
     const Json& t = root.get("time");
     const Json kind = t.is_object() && t.contains("kind") ? t.at("kind") : Json();
     if (kind == "steady") {
-      const Object o(t, "time", {"kind", "max_iterations", "residual_orders"});
+      const Object o(t, "time", {"kind", "max_iterations", "residual_orders", "linear_solver"});
       in.time.kind = "steady";
       in.time.max_iterations = o.integer("max_iterations", 1);
       in.time.residual_orders = o.positive("residual_orders");
+      in.time.linear_solver = o.tag("linear_solver", {"multigrid", "gauss-seidel", "lines"});
     } else if (kind == "unsteady") {
       const Object o(t, "time", {"kind", "steps", "dt", "cfl", "average_from"});
       in.time.kind = "unsteady";

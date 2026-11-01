@@ -1,7 +1,7 @@
 add_executable(autan_solvers_tests test_multigrid.cpp)
 target_link_libraries(
   autan_solvers_tests
-  PRIVATE autan::solvers autan::io Catch2::Catch2WithMain autan_compile_options
+  PRIVATE autan::solvers autan::io autan::partition Catch2::Catch2WithMain autan_compile_options
 )
 target_compile_definitions(
   autan_solvers_tests

@@ -271,11 +271,13 @@ class Freestream(Spec):
 
 class Steady(Spec):
     """Local time stepping until every residual drops ``residual_orders`` orders, at most
-    ``max_iterations`` iterations."""
+    ``max_iterations`` iterations; an implicit physics solves each step's linear system with
+    ``linear_solver``."""
 
     kind: Literal["steady"] = "steady"
     max_iterations: Count = 10000
     residual_orders: PositiveNumber = 8.0
+    linear_solver: Literal["multigrid", "gauss-seidel", "lines"] = "multigrid"
 
 
 class Unsteady(Spec):

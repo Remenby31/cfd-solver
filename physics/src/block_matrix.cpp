@@ -115,8 +115,10 @@ void BlockMatrix::multiply(std::span<const double> x, std::span<double> y) const
   }
 }
 
-void BlockMatrix::factor() {
-  for (std::size_t c = 0; c < n_cells_; ++c) invert5(&diag_[25 * c], &inverse_[25 * c]);
+void BlockMatrix::factor() { factor(n_cells_); }
+
+void BlockMatrix::factor(std::size_t rows) {
+  for (std::size_t c = 0; c < rows; ++c) invert5(&diag_[25 * c], &inverse_[25 * c]);
 }
 
 void BlockMatrix::relax(std::size_t c, std::span<const double> b, std::span<double> x) const {
@@ -147,6 +149,21 @@ void BlockMatrix::gauss_seidel(std::span<const double> b, std::span<double> x, i
     }
     for (auto it = colours_.rbegin(); it != colours_.rend(); ++it) {
       for (const std::size_t c : *it) relax(c, b, x);
+    }
+  }
+}
+
+void BlockMatrix::gauss_seidel(std::span<const double> b, std::span<double> x, int sweeps,
+                               std::span<const std::vector<std::size_t>> colours,
+                               const std::function<void(std::span<double>)>& exchange) const {
+  for (int s = 0; s < sweeps; ++s) {
+    for (const auto& colour : colours) {
+      for (const std::size_t c : colour) relax(c, b, x);
+      exchange(x);
+    }
+    for (auto it = colours.rbegin(); it != colours.rend(); ++it) {
+      for (const std::size_t c : *it) relax(c, b, x);
+      exchange(x);
     }
   }
 }

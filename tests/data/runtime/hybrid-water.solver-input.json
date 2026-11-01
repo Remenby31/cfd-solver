@@ -165,7 +165,8 @@
   "time": {
     "kind": "steady",
     "max_iterations": 10000,
-    "residual_orders": 8.0
+    "residual_orders": 8.0,
+    "linear_solver": "multigrid"
   },
   "monitors": [],
   "verification": null,

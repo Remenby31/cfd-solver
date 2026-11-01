@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -32,10 +33,20 @@ class BlockMatrix {
   /// Inverts every diagonal block (Gaussian elimination with partial pivoting); throws
   /// std::domain_error on a singular block.
   void factor();
+  /// As factor(), for the first `rows` cells only (the owned cells of a partition, whose rows
+  /// are complete).
+  void factor(std::size_t rows);
   /// `sweeps` symmetric multicolour block Gauss-Seidel sweeps on A x = b from x, after factor().
   /// Cells of one colour share no face, so their updates are independent; the order is fixed,
   /// so the result is deterministic.
   void gauss_seidel(std::span<const double> b, std::span<double> x, int sweeps) const;
+  /// `sweeps` symmetric block Gauss-Seidel sweeps over the given colours (each a list of owned
+  /// cells sharing no face), in increasing then decreasing colour order, calling `exchange(x)`
+  /// after each colour so that ghost cells take the values their owners just computed. With
+  /// colours that do not depend on the partition, neither does the result.
+  void gauss_seidel(std::span<const double> b, std::span<double> x, int sweeps,
+                    std::span<const std::vector<std::size_t>> colours,
+                    const std::function<void(std::span<double>)>& exchange) const;
 
  private:
   void relax(std::size_t c, std::span<const double> b, std::span<double> x) const;

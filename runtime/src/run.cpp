@@ -130,8 +130,9 @@ struct Prepared {
   std::map<std::string, index_t> face_zone;  // boundary zone name -> Mesh::face_zones() index
   std::vector<std::vector<index_t>> monitor_zones;
   const PhysicsFactory* factory = nullptr;
-  std::optional<StartState> start;  // input.start, read and checked
-  Json start_averaging;             // `continue`: the previous run's averaging
+  const PartitionGroups* groups = nullptr;  // the physics' groups; null or empty: none
+  std::optional<StartState> start;          // input.start, read and checked
+  Json start_averaging;                     // `continue`: the previous run's averaging
   // oracle-state: paired face states per face zone, and the files to archive (sha256, bytes).
   std::map<index_t, std::vector<double>> boundary_states;
   std::map<std::string, std::string> state_files;
@@ -773,6 +774,7 @@ Prepared prepare(const fs::path& input_file, const PhysicsRegistry& registry, in
   }
   const auto* entry = registry.find(p.input);
   p.factory = entry != nullptr ? &entry->factory : nullptr;
+  p.groups = entry != nullptr ? &entry->groups : nullptr;
   if (entry != nullptr && entry->scope) {
     if (auto refusal = entry->scope(p.input, ranks)) {
       auto data = nlohmann::json::parse(refusal->data_json);
@@ -840,7 +842,12 @@ Json forces_record(const Loads& loads, const ForcesMonitor& monitor, const Frees
 class Run final : public Log {
  public:
   Run(Prepared& p, const SolverBuild& build, Comm& comm)
-      : p_(p), comm_(comm), geometry_(compute_geometry(p.mesh)), local_(make_part()) {
+      : p_(p),
+        comm_(comm),
+        geometry_(compute_geometry(p.mesh)),
+        groups_(p.groups != nullptr && *p.groups ? (*p.groups)(p.input, p.mesh, geometry_)
+                                                 : CellGroups{}),
+        local_(make_part()) {
     if (p_.input.device_kind == "cuda") gpu_.emplace(comm_.local_rank());
     if (local_) {
       ghosts_ = comm_.ghost_exchange(*local_);
@@ -968,7 +975,11 @@ class Run final : public Log {
                                  .device = gpu_ ? gpu_->index() : -1,
                                  .stream = gpu_ ? gpu_->stream() : nullptr,
                                  .cell_colours = colours_,
-                                 .n_colours = n_colours_};
+                                 .n_colours = n_colours_,
+                                 .group_offsets = group_offsets_,
+                                 .group_cells = group_cells_,
+                                 .cell_group_colours = group_colours_,
+                                 .n_group_colours = n_group_colours_};
     std::string status = "running";
     std::int64_t done = continued() ? p_.input.start->iterations : 0;
     try {
@@ -1010,7 +1021,8 @@ class Run final : public Log {
   }
 
   // On several ranks, each runs its part of the mesh, partitioned by METIS
-  // with the face-count cost of each cell; every rank partitions the same
+  // with the face-count cost of each cell and the physics' groups kept
+  // whole; every rank partitions the same
   // mesh with the same seed, so all agree on the parts (partitioning.md).
   // On one rank, a mesh with periodic pairs runs on its one-part partition,
   // whose image ghosts make each periodic face an interior face; its owned
@@ -1020,7 +1032,12 @@ class Run final : public Log {
     const std::int32_t n = comm_.size();
     if (n == 1 && mesh.periodic_pairs().empty()) return std::nullopt;
     std::vector<std::int32_t> parts(at(mesh.n_cells()), 0);
-    if (n > 1) parts = partition_cells(mesh, n, {.cell_weights = cell_cost_weights(mesh)});
+    if (n > 1) {
+      parts = partition_cells(mesh, n,
+                              {.cell_weights = cell_cost_weights(mesh),
+                               .group_offsets = groups_.offsets,
+                               .group_cells = groups_.cells});
+    }
     LocalPartition part = extract_partition(mesh, geometry_, parts, n, comm_.rank());
     comm_.fill_ghosts(part);
     return part;
@@ -1073,17 +1090,42 @@ class Run final : public Log {
   }
   // The global colouring of the mesh (colour_cells), for each cell of the
   // physics' mesh through its global id: every rank computes the same.
+  // With the physics' groups, their colouring and the groups this rank owns
+  // (by increasing least global id, each in the physics' order) likewise.
   void colour_cells_of_physics() {
     const Mesh& mesh = p_.mesh;
-    const auto colours = colour_cells(mesh);
-    std::vector<std::int32_t> by_id(colours.size());
-    for (std::size_t c = 0; c < colours.size(); ++c)
-      by_id[static_cast<std::size_t>(mesh.cell_global_id()[c])] = colours[c];
+    const auto z = [](std::int64_t i) { return static_cast<std::size_t>(i); };
+    const auto global_ids = mesh.cell_global_id();
     const auto ids = physics_mesh().cell_global_id();
-    colours_.resize(ids.size());
-    for (std::size_t c = 0; c < ids.size(); ++c)
-      colours_[c] = by_id[static_cast<std::size_t>(ids[c])];
-    for (const std::int32_t k : colours) n_colours_ = std::max(n_colours_, k + 1);
+    const auto of_physics = [&](const std::vector<std::int32_t>& colours,
+                                std::vector<std::int32_t>& out, std::int32_t& n_out) {
+      std::vector<std::int32_t> by_id(colours.size());
+      for (std::size_t c = 0; c < colours.size(); ++c) by_id[z(global_ids[c])] = colours[c];
+      out.resize(ids.size());
+      for (std::size_t c = 0; c < ids.size(); ++c) out[c] = by_id[z(ids[c])];
+      for (const std::int32_t k : colours) n_out = std::max(n_out, k + 1);
+    };
+    of_physics(colour_cells(mesh), colours_, n_colours_);
+    if (p_.groups == nullptr || !*p_.groups) return;
+    of_physics(colour_cells(mesh, groups_.offsets, groups_.cells), group_colours_,
+               n_group_colours_);
+    std::vector<index_t> owned_at(at(mesh.n_cells()), -1);  // by global id
+    for (index_t c = 0; c < physics_mesh().n_owned_cells(); ++c) owned_at[z(ids[at(c)])] = c;
+    std::vector<std::pair<std::int64_t, std::size_t>> order;  // (least global id, group)
+    for (std::size_t g = 0; g + 1 < groups_.offsets.size(); ++g) {
+      std::int64_t least = std::numeric_limits<std::int64_t>::max();
+      for (auto k = groups_.offsets[g]; k < groups_.offsets[g + 1]; ++k)
+        least = std::min(least, global_ids[at(groups_.cells[z(k)])]);
+      order.emplace_back(least, g);
+    }
+    std::ranges::sort(order);
+    group_offsets_.assign(1, 0);
+    for (const auto& [least, g] : order) {
+      if (owned_at[z(least)] < 0) continue;
+      for (auto k = groups_.offsets[g]; k < groups_.offsets[g + 1]; ++k)
+        group_cells_.push_back(owned_at[z(global_ids[at(groups_.cells[z(k)])])]);
+      group_offsets_.push_back(static_cast<offset_t>(group_cells_.size()));
+    }
   }
 
   [[nodiscard]] const Mesh& physics_mesh() const { return local_ ? local_->mesh : p_.mesh; }
@@ -1506,9 +1548,15 @@ class Run final : public Log {
   // Declared before the physics, so destroyed after it: its stream outlives the physics' use.
   std::optional<Gpu> gpu_;
   Geometry geometry_;
+  CellGroups groups_;  // the physics' groups, over p_.mesh's cells
   std::optional<LocalPartition> local_;
   std::vector<std::int32_t> colours_;  // global colouring, the physics mesh's cells
   std::int32_t n_colours_ = 0;
+  // The groups this rank owns, over the physics mesh's owned cells, and their colouring.
+  std::vector<offset_t> group_offsets_;
+  std::vector<index_t> group_cells_;
+  std::vector<std::int32_t> group_colours_;
+  std::int32_t n_group_colours_ = 0;
   std::unique_ptr<GhostExchange> ghosts_;
   std::optional<StartState> local_start_;                // the owned cells' share of p_.start
   std::optional<std::vector<io::Field>> local_initial_;  // and of p_.initial
@@ -1524,8 +1572,9 @@ class Run final : public Log {
 }  // namespace
 
 void PhysicsRegistry::add(PhysicsKey key, PhysicsFactory factory, PhysicsScope scope,
-                          bool several_ranks) {
-  entries_.emplace_back(std::move(key), Entry{std::move(factory), std::move(scope), several_ranks});
+                          bool several_ranks, PartitionGroups groups) {
+  entries_.emplace_back(std::move(key), Entry{std::move(factory), std::move(scope), several_ranks,
+                                              std::move(groups)});
 }
 
 const PhysicsRegistry::Entry* PhysicsRegistry::find(const SolverInput& in) const {
@@ -1590,11 +1639,13 @@ ExitStatus run_case(const fs::path& input_file, const fs::path& runs,
     }
     return run.execute();
   } catch (const std::exception& e) {
-    // The run directory could not be created or its run.json not written:
+    // The run could not be set up (a coded error keeps its code, invalid
+    // partition groups E0140), its directory created or its run.json written:
     // nothing records the failure but this diagnostic. On several ranks, the
     // others may wait in a collective call: every rank ends.
+    const auto* coded = dynamic_cast<const Error*>(&e);
     std::fprintf(err, "%s\n",
-                 Diagnostic{.code = "E0704",
+                 Diagnostic{.code = coded != nullptr ? error_code_string(coded->code()) : "E0704",
                             .message = e.what(),
                             .path = "",
                             .data_json = Json{{"rank", comm->rank()}}.dump()}

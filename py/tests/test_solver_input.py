@@ -16,7 +16,7 @@ import rfc8785
 from autan.cli import json_schema, main
 from pydantic import ValidationError
 
-from tests.conftest import FIXTURES
+from tests.conftest import CRM_HL, FIXTURES
 
 R_UNIVERSAL = 8.314462618
 
@@ -81,7 +81,12 @@ def test_crm_hl_input_is_resolved_and_closed_in_si(
     assert forces["zones"] == ["wing.slat", "wing.main", "wing.flap"]
     assert forces["ref_area"] == pytest.approx(191.84)
     assert forces["ref_length"] == pytest.approx(7.0)
-    assert document["time"] == {"kind": "steady", "max_iterations": 10000, "residual_orders": 8.0}
+    assert document["time"] == {
+        "kind": "steady",
+        "max_iterations": 10000,
+        "residual_orders": 8.0,
+        "linear_solver": "multigrid",
+    }
 
 
 def test_heat_exchanger_media_and_inlets_in_si(
@@ -217,3 +222,25 @@ def test_each_published_schema_has_its_identifier(name: str) -> None:
     schema = json_schema(name)
     assert schema["$id"] == autan.version.SCHEMAS[name]
     assert schema["properties"]["schema"]["const"] == autan.version.SCHEMAS[name]
+
+
+@pytest.mark.parametrize("linear_solver", ["multigrid", "gauss-seidel", "lines"])
+def test_the_linear_solver_is_a_steady_choice(
+    write_case: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    linear_solver: str,
+) -> None:
+    body = CRM_HL + f"case.time = autan.Steady(linear_solver='{linear_solver}')\n"
+    case = write_case(body)
+    copy = tmp_path / "copy.toml"
+    copy.write_text(autan.load(case).to_toml())
+    assert autan.load(copy).spec == autan.load(case).spec
+    assert main(["prepare", str(case), "--mesh-info", str(FIXTURES / "crm-hl.meshinfo.json")]) == 0
+    document = json.loads(capsys.readouterr().out)
+    validator = jsonschema.Draft202012Validator(json_schema("solver-input"))
+    validator.validate(document)
+    assert document["time"]["linear_solver"] == linear_solver
+    unsteady = {"kind": "unsteady", "steps": 10, "dt": 1e-3, "cfl": None, "average_from": None}
+    with pytest.raises(jsonschema.ValidationError):  # an unsteady run has no linear solver choice
+        validator.validate(document | {"time": unsteady | {"linear_solver": "multigrid"}})

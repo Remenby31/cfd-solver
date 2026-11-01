@@ -1,10 +1,12 @@
 #include <algorithm>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <vector>
 
 #include "autan/core/error.hpp"
 #include "autan/partition/partition.hpp"
+#include "groups.hpp"
 
 namespace autan {
 namespace {
@@ -48,24 +50,39 @@ std::vector<std::int32_t> colour_greedy(std::span<const offset_t> offsets,
   return colour;
 }
 
-std::vector<std::int32_t> colour_cells(const Mesh& global) {
+std::vector<std::int32_t> colour_cells(const Mesh& global, std::span<const offset_t> group_offsets,
+                                       std::span<const index_t> group_cells) {
   if (global.n_cells() != global.n_owned_cells()) {
     throw Error(ErrorCode::partition_input_has_ghosts,
                 "colour_cells colours an unpartitioned mesh");
   }
-  const auto n = at(global.n_cells());
+  // Nodes: cells, or groups and the cells outside them.
+  const std::vector<std::int64_t> node_of = detail::group_nodes(global, group_offsets, group_cells);
+  const auto ids = global.cell_global_id();
+  std::vector<std::int64_t> node_id(ids.begin(), ids.end());
+  if (!node_of.empty()) {
+    node_id.assign(at(*std::ranges::max_element(node_of) + 1),
+                   std::numeric_limits<std::int64_t>::max());
+    for (std::size_t c = 0; c < node_of.size(); ++c)
+      node_id[at(node_of[c])] = std::min(node_id[at(node_of[c])], ids[c]);
+  }
+  const auto node = [&](index_t c) {
+    return node_of.empty() ? c : static_cast<index_t>(node_of[at(c)]);
+  };
+  const auto n = node_id.size();
   // Neighbour pairs: across interior faces, and across periodic pairs
   // (the owners of matched faces).
   std::vector<std::pair<index_t, index_t>> pairs;
   for (index_t f = 0; f < global.n_interior_faces(); ++f)
-    pairs.emplace_back(global.owner()[at(f)], global.neighbour()[at(f)]);
+    pairs.emplace_back(node(global.owner()[at(f)]), node(global.neighbour()[at(f)]));
   const auto offsets = global.boundary_zone_offsets();
   const auto periodic = global.periodic_pairs();
   for (std::size_t p = 0; p < periodic.size(); ++p) {
     const auto partners = global.periodic_partners(p);
     const index_t first = offsets[at(periodic[p].zone_a)];
     for (std::size_t k = 0; k < partners.size(); ++k) {
-      pairs.emplace_back(global.owner()[at(first) + k], global.owner()[at(partners[k])]);
+      pairs.emplace_back(node(global.owner()[at(first) + k]),
+                         node(global.owner()[at(partners[k])]));
     }
   }
   std::vector<offset_t> csr(n + 1, 0);
@@ -82,7 +99,11 @@ std::vector<std::int32_t> colour_cells(const Mesh& global) {
     adjacent[at(fill[at(a)]++)] = b;
     adjacent[at(fill[at(b)]++)] = a;
   }
-  return colour_greedy(csr, adjacent, global.cell_global_id());
+  const auto colour = colour_greedy(csr, adjacent, node_id);
+  if (node_of.empty()) return colour;
+  std::vector<std::int32_t> of_cells(node_of.size());
+  for (std::size_t c = 0; c < node_of.size(); ++c) of_cells[c] = colour[at(node_of[c])];
+  return of_cells;
 }
 
 }  // namespace autan

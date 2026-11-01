@@ -43,20 +43,26 @@ struct Euler<P>::Impl {
   GhostFill* ghosts = nullptr;
 
   // Fills the ghost values of `n` components of an array laid out c * n_cells + i.
+  // The exchange takes at most 16 components a call.
   template <class T>
   void fill_ghosts(std::vector<T>& v, std::size_t n) const {
     if (ghosts == nullptr) return;
     const auto nc = static_cast<std::size_t>(topo.n_cells);
-    std::array<T*, 16> components{};
-    for (std::size_t k = 0; k < n; ++k) components[k] = v.data() + k * nc;
-    ghosts->forward(std::span<T* const>(components.data(), n));
+    for (std::size_t first = 0; first < n; first += 16) {
+      const std::size_t count = std::min<std::size_t>(16, n - first);
+      std::array<T*, 16> components{};
+      for (std::size_t k = 0; k < count; ++k) components[k] = v.data() + (first + k) * nc;
+      ghosts->forward(std::span<T* const>(components.data(), count));
+    }
   }
 
-  // The loops before the faces: primitives, boundary states, gradients and limiter of the owned
-  // cells, each filled into the ghosts before a later loop reads it there.
+  // The loops before the faces: primitives (and their Jacobian dW/dU, which the coupling blocks
+  // of faces to ghost cells take), boundary states, gradients and limiter of the owned cells,
+  // each filled into the ghosts before a later loop or the assembly reads it there.
   void cell_loops(bool jacobian) {
     if (jacobian) {
       ek::cpu::primitives_jacobian(d);
+      fill_ghosts(dwdu, 25);
     } else {
       ek::cpu::primitives(d);
     }
@@ -416,26 +422,28 @@ void Euler<P>::assemble(std::span<const double> shift, BlockMatrix& a) const {
     }
   };
   a.zero();
+  // Each diagonal block gathers its cell's faces in Topology::cell_faces order, as the device
+  // gather does, so that both sum in the same order (R_o += F, R_n -= F).
   for (std::size_t c = 0; c < nc; ++c) {
     double* dg = a.diagonal(c);
     for (std::size_t i = 0; i < 5; ++i) dg[6 * i] += shift[c];
+    const auto dc = block(m.dwdu, nc, c, 0);
+    for (auto k = m.topo.cell_face_offsets[c]; k < m.topo.cell_face_offsets[c + 1]; ++k) {
+      const auto f = static_cast<std::size_t>(m.topo.cell_faces[k]);
+      if (f >= ni) {
+        add_product(dg, block(m.bnd_jac, nf, f, 0), dc, 1.0);
+      } else if (static_cast<std::size_t>(m.topo.owner[f]) == c) {
+        add_product(dg, block(m.face_jac, nf, f, 0), dc, 1.0);
+      } else {
+        add_product(dg, block(m.face_jac, nf, f, 1), dc, -1.0);
+      }
+    }
   }
   for (std::size_t f = 0; f < ni; ++f) {
     const auto o = static_cast<std::size_t>(m.topo.owner[f]);
     const auto n = static_cast<std::size_t>(m.topo.neighbour[f]);
-    const auto jl = block(m.face_jac, nf, f, 0);
-    const auto jr = block(m.face_jac, nf, f, 1);
-    const auto dl = block(m.dwdu, nc, o, 0);
-    const auto dr = block(m.dwdu, nc, n, 0);
-    // R_o += F, R_n -= F.
-    add_product(a.diagonal(o), jl, dl, 1.0);
-    add_product(a.upper(f), jr, dr, 1.0);
-    add_product(a.lower(f), jl, dl, -1.0);
-    add_product(a.diagonal(n), jr, dr, -1.0);
-  }
-  for (std::size_t f = ni; f < nf; ++f) {
-    const auto o = static_cast<std::size_t>(m.topo.owner[f]);
-    add_product(a.diagonal(o), block(m.bnd_jac, nf, f, 0), block(m.dwdu, nc, o, 0), 1.0);
+    add_product(a.upper(f), block(m.face_jac, nf, f, 1), block(m.dwdu, nc, n, 0), 1.0);
+    add_product(a.lower(f), block(m.face_jac, nf, f, 0), block(m.dwdu, nc, o, 0), -1.0);
   }
 }
 

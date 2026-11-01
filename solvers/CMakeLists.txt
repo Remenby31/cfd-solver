@@ -1,5 +1,5 @@
 # Linear solvers of the implicit step: agglomeration multigrid with line-implicit smoothing.
-add_library(autan_solvers src/agglomeration.cpp src/multigrid.cpp)
+add_library(autan_solvers src/agglomeration.cpp src/gcr.cpp src/line_smoother.cpp src/multigrid.cpp)
 add_library(autan::solvers ALIAS autan_solvers)
 target_include_directories(
   autan_solvers

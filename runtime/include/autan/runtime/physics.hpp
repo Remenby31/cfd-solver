@@ -100,6 +100,17 @@ struct PhysicsContext {
   /// smoother that sweeps them, exchanging ghosts after each colour, repeats its bits.
   std::span<const std::int32_t> cell_colours;
   std::int32_t n_colours = 0;
+  /// With a physics that gives partition groups (PhysicsRegistry::Entry::groups): the groups
+  /// this rank owns, as CSR over the owned cells of `mesh`, by increasing least
+  /// cell_global_id, each group's cells in the order the physics gave them; and the colour of
+  /// each cell of `mesh` (owned and ghosts) in the global colouring of the groups
+  /// (colour_cells with groups: a cell outside every group is its own node), with the number of
+  /// colours. A line smoother that sweeps these colours, each line in its order, exchanging
+  /// ghosts after each colour, repeats its bits on any number of ranks. Empty otherwise.
+  std::span<const offset_t> group_offsets;
+  std::span<const index_t> group_cells;
+  std::span<const std::int32_t> cell_group_colours;
+  std::int32_t n_group_colours = 0;
 };
 
 // case-schema.md#time: C * eps32 with C = 0.5, at least 4.3 times the round-off plateaus
@@ -164,6 +175,20 @@ struct PhysicsRefusal {
 using PhysicsScope =
     std::function<std::optional<PhysicsRefusal>(const SolverInput& input, int ranks)>;
 
+/// Groups of cells of the global mesh that the partition keeps on one rank, as CSR
+/// (PartitionOptions::group_offsets and group_cells).
+struct CellGroups {
+  std::vector<offset_t> offsets;
+  std::vector<index_t> cells;
+};
+
+/// The groups a physics needs whole on one rank (a smoother's lines), from the global mesh and
+/// its geometry. Every rank calls it once with the same mesh before partitioning, on any number
+/// of ranks, so it must be deterministic; invalid groups are E0140. The physics receives them
+/// as PhysicsContext::group_offsets and group_cells, coloured.
+using PartitionGroups =
+    std::function<CellGroups(const SolverInput& input, const Mesh& mesh, const Geometry& geometry)>;
+
 /// The physics a build of autan-run provides; the first matching key wins.
 class PhysicsRegistry {
  public:
@@ -173,9 +198,10 @@ class PhysicsRegistry {
     /// Whether it runs on several ranks: its norms, loads and other sums
     /// reduce over PhysicsContext::ranks (runtime.md, Ranks).
     bool several_ranks = false;
+    PartitionGroups groups;  ///< empty: no group
   };
   void add(PhysicsKey key, PhysicsFactory factory, PhysicsScope scope = {},
-           bool several_ranks = false);
+           bool several_ranks = false, PartitionGroups groups = {});
   /// The entry for `input`, or null when this build has none (E0706).
   [[nodiscard]] const Entry* find(const SolverInput& input) const;
 

@@ -289,6 +289,7 @@ class SteadyInput(_Strict):
     kind: Literal["steady"]
     max_iterations: Annotated[int, Field(ge=1)]
     residual_orders: Positive
+    linear_solver: Literal["multigrid", "gauss-seidel", "lines"]
 
 
 class UnsteadyInput(_Strict):
@@ -742,6 +743,7 @@ def build(
             kind="steady",
             max_iterations=spec.time.max_iterations,
             residual_orders=spec.time.residual_orders,
+            linear_solver=spec.time.linear_solver,
         )
         if isinstance(spec.time, Steady)
         else UnsteadyInput(

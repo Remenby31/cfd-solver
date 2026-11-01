@@ -8,6 +8,7 @@
 #include "autan/core/geometry.hpp"
 #include "autan/core/mesh.hpp"
 #include "autan/solvers/agglomeration.hpp"
+#include "autan/solvers/gcr.hpp"
 
 namespace autan::solvers {
 
@@ -53,10 +54,7 @@ class Multigrid {
                     std::span<const double> lower);
   /// One multigrid cycle on A x = b from x.
   void cycle(std::span<const double> b, std::span<double> x);
-  struct Report {
-    int cycles = 0;              ///< multigrid cycles applied
-    double residual_drop = 1.0;  ///< |b - A x| / |b - A x0|; NaN when not finite
-  };
+  using Report = KrylovReport;
   /// Solves A x = b from x by the generalised conjugate residual method preconditioned by one
   /// multigrid cycle per iteration, until |b - A x| <= tolerance |b - A x0| or `max_cycles`
   /// iterations.
@@ -78,7 +76,7 @@ class Multigrid {
   // Per level: residual, restricted right-hand side and correction of the next level.
   std::vector<std::vector<double>> r_, bc_, xc_, e_, q_;
   std::vector<std::vector<std::vector<double>>> krylov_;  // per level: v1, w1, v2, w2, r1
-  std::vector<std::vector<double>> directions_, images_;  // outer iteration: z_k, A z_k
+  Gcr gcr_;
   std::vector<double> residual_;
   bool direct_ = false;
 };

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "autan/core/error.hpp"
+#include "groups.hpp"
 
 #ifdef AUTAN_HAVE_METIS
 #include <metis.h>
@@ -54,42 +55,6 @@ DualGraph dual_graph(const Mesh& mesh) {
     g.adjacency[at(fill[at(neighbour[f])]++)] = owner[f];
   }
   return g;
-}
-
-// Each cell's node once the groups of `options` contract: groups first in
-// their order, then the other cells in theirs; empty when there is no group.
-// Throws E0140 for malformed offsets, an empty group, or a cell out of range
-// or in two groups.
-std::vector<std::int64_t> group_nodes(const Mesh& mesh, const PartitionOptions& options) {
-  const auto& offsets = options.group_offsets;
-  if (offsets.empty()) {
-    if (!options.group_cells.empty()) {
-      throw Error(ErrorCode::partition_invalid_request, "group_cells without group_offsets");
-    }
-    return {};
-  }
-  if (offsets.front() != 0 || at(offsets.back()) != options.group_cells.size() ||
-      std::ranges::adjacent_find(offsets, std::greater_equal{}) != offsets.end()) {
-    throw Error(ErrorCode::partition_invalid_request,
-                "group offsets are malformed or a group is empty");
-  }
-  std::vector<std::int64_t> node_of(at(mesh.n_cells()), -1);
-  const std::size_t n_groups = offsets.size() - 1;
-  for (std::size_t g = 0; g < n_groups; ++g) {
-    for (auto k = offsets[g]; k < offsets[g + 1]; ++k) {
-      const index_t c = options.group_cells[at(k)];
-      if (c < 0 || c >= mesh.n_cells() || node_of[at(c)] != -1) {
-        throw Error(ErrorCode::partition_invalid_request,
-                    "cell " + std::to_string(c) + " is out of range or in two groups");
-      }
-      node_of[at(c)] = static_cast<std::int64_t>(g);
-    }
-  }
-  auto next = static_cast<std::int64_t>(n_groups);
-  for (auto& node : node_of) {
-    if (node == -1) node = next++;
-  }
-  return node_of;
 }
 
 // The dual graph with the cells of each node of `node_of` contracted into one.
@@ -242,6 +207,42 @@ std::vector<std::int32_t> partition_scotch(const DualGraph& graph, std::int32_t 
 
 }  // namespace
 
+// Each cell's node once the groups of `options` contract: groups first in
+// their order, then the other cells in theirs; empty when there is no group.
+// Throws E0140 for malformed offsets, an empty group, or a cell out of range
+// or in two groups.
+std::vector<std::int64_t> detail::group_nodes(const Mesh& mesh, std::span<const offset_t> offsets,
+                                              std::span<const index_t> group_cells) {
+  if (offsets.empty()) {
+    if (!group_cells.empty()) {
+      throw Error(ErrorCode::partition_invalid_request, "group_cells without group_offsets");
+    }
+    return {};
+  }
+  if (offsets.front() != 0 || at(offsets.back()) != group_cells.size() ||
+      std::ranges::adjacent_find(offsets, std::greater_equal{}) != offsets.end()) {
+    throw Error(ErrorCode::partition_invalid_request,
+                "group offsets are malformed or a group is empty");
+  }
+  std::vector<std::int64_t> node_of(at(mesh.n_cells()), -1);
+  const std::size_t n_groups = offsets.size() - 1;
+  for (std::size_t g = 0; g < n_groups; ++g) {
+    for (auto k = offsets[g]; k < offsets[g + 1]; ++k) {
+      const index_t c = group_cells[at(k)];
+      if (c < 0 || c >= mesh.n_cells() || node_of[at(c)] != -1) {
+        throw Error(ErrorCode::partition_invalid_request,
+                    "cell " + std::to_string(c) + " is out of range or in two groups");
+      }
+      node_of[at(c)] = static_cast<std::int64_t>(g);
+    }
+  }
+  auto next = static_cast<std::int64_t>(n_groups);
+  for (auto& node : node_of) {
+    if (node == -1) node = next++;
+  }
+  return node_of;
+}
+
 std::vector<std::int32_t> cell_cost_weights(const Mesh& mesh) {
   const auto offsets = mesh.cell_face_offsets();
   std::vector<std::int32_t> weights(at(mesh.n_cells()));
@@ -264,7 +265,8 @@ std::vector<std::int32_t> partition_cells(const Mesh& mesh, std::int32_t n_parts
     throw Error(ErrorCode::partition_invalid_request, "imbalance_tolerance must be ≥ 0");
   }
   // Groups contract into one node each; the other cells stay alone.
-  const std::vector<std::int64_t> node_of = group_nodes(mesh, options);
+  const std::vector<std::int64_t> node_of =
+      detail::group_nodes(mesh, options.group_offsets, options.group_cells);
   if (n_parts == 1) return std::vector<std::int32_t>(at(mesh.n_cells()), 0);
   const DualGraph graph =
       node_of.empty() ? dual_graph(mesh) : contracted(dual_graph(mesh), node_of, n_parts);

@@ -49,6 +49,18 @@ struct AgglomerationOptions {
   int max_levels = 30;
 };
 
+/// The fine level's lines of at least two cells (Level::line_offsets / line_nodes of
+/// agglomerate's level 0, single cells left out), CSR over the cells of `mesh`, each line in
+/// its sweep order. Deterministic: the same mesh and geometry give the same lines, so every rank
+/// of a run computes them alike on the global mesh. Throws std::invalid_argument on a mesh with
+/// ghost cells.
+struct Lines {
+  std::vector<offset_t> offsets{0};
+  std::vector<index_t> cells;
+};
+Lines smoother_lines(const Mesh& mesh, const Geometry& geometry,
+                     const AgglomerationOptions& options = {});
+
 /// Agglomeration hierarchy of a mesh without ghost cells, finest level first. Throws
 /// std::invalid_argument on a mesh with ghost cells. Deterministic: the result depends only on
 /// the mesh, its geometry and the options.

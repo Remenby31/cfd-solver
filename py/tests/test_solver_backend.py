@@ -78,10 +78,12 @@ def test_the_shipped_runtime_reports_missing_physics(
     assert not any((tmp_path / "runs").iterdir())
 
 
+@pytest.mark.parametrize("linear_solver", ["multigrid", "gauss-seidel", "lines"])
 def test_a_real_run_reads_back_through_the_results_contract(
-    hybrid: tuple[autan.Case, autan.MeshInfo], tmp_path: Path
+    hybrid: tuple[autan.Case, autan.MeshInfo], tmp_path: Path, linear_solver: str
 ) -> None:
     case, mesh = hybrid
+    case.time = autan.Steady(linear_solver=linear_solver)  # the runtime's parser accepts it
     backend = autan.SolverBackend(executable=RELAXATION, deterministic=True)
     result = case.run(mesh, backend=backend, runs=tmp_path / "runs")
     run = result.run
