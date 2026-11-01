@@ -267,12 +267,15 @@ def write_run(
         averaging=None,
         diagnostics=(),
     )
-    # oracle-state conditions: the face-state files, archived as results.md#run-directory says.
+    # oracle-state conditions and the initial state: their files, archived as
+    # results.md#run-directory says.
     states = {
         rule.condition.sha256: case.resolve(rule.condition.path).read_bytes()
         for rule in spec.boundaries
         if rule.condition.kind == "oracle-state"
     }
+    if spec.initial_state is not None:
+        states[spec.initial_state.sha256] = case.resolve(spec.initial_state.path).read_bytes()
     writer = RunWriter(runs, run, spec, info, states=states)
     writer.append(
         {

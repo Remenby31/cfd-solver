@@ -139,6 +139,7 @@ class EulerPhysics final : public runtime::Physics {
       const auto& init = zones.at(mesh.cell_zones()[zi].name)->initial;
       set_cell(c, *init.density, *init.velocity, *init.pressure);
     }
+    if (ctx.initial != nullptr) start_from_initial(*ctx.initial);
     state_.assign(5 * n_, State(0));
     res_.assign(5 * n_, Res(0));
     lambda_.assign(n_, State(0));
@@ -430,6 +431,25 @@ class EulerPhysics final : public runtime::Physics {
       for (std::size_t k = 0; k < 5; ++k) first_norms_.push_back(v[4 + k].second);
     }
     cfl_cap_ = v[9].second;
+  }
+
+  // initial-state.md: the owned cells' state from the case's initial-state file; a NaN row (a
+  // solid cell) keeps its zone's state.
+  void start_from_initial(const std::vector<io::Field>& fields) {
+    auto find = [&](const char* name) -> const std::vector<double>& {
+      for (const auto& f : fields) {
+        if (f.name == name) return f.values;
+      }
+      throw std::invalid_argument(std::string("initial state has no field ") + name);
+    };
+    const auto& rho = find("Density");
+    const std::array<const std::vector<double>*, 3> v{&find("VelocityX"), &find("VelocityY"),
+                                                      &find("VelocityZ")};
+    const auto& p = find("Pressure");
+    for (std::size_t c = 0; c < owned_; ++c) {
+      if (std::isnan(rho[c])) continue;
+      set_cell(c, rho[c], {(*v[0])[c], (*v[1])[c], (*v[2])[c]}, p[c]);
+    }
   }
 
   void set_cell(std::size_t c, double rho, const std::array<double, 3>& v, double p) {

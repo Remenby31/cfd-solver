@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import autan
 import numpy as np
-from autan import cgns
+from autan import cgns, initial_state
 from autan.results import field_names
 from autan.schema import (
     DDES,
@@ -387,6 +387,33 @@ def _scale(run: RunErrors, name: str) -> float:
     return scale if scale > 0.0 else 1.0
 
 
+# The initial-state file's variables (initial-state.md), as the oracle names its fields.
+_INITIAL_FIELDS = ("Density", "VelocityX", "VelocityY", "VelocityZ", "Pressure")
+
+
+def _initial_state_problem(results: autan.Results, oracle: Oracle) -> str | None:
+    """Why the run's initial state, if it has one, is not `oracle` at its start: the archived file
+    must name the oracle and hold its values at t = 0 (steady: its only state) at its centroids,
+    to the file's 17 significant digits."""
+    spec = results.case.initial_state
+    if spec is None:
+        return None
+    path = results.path / "states" / f"{spec.sha256}.json"
+    document = initial_state.parse(path.read_bytes())
+    run = results.run.run_id
+    if isinstance(document, str):
+        return f"run {run}: its initial state is not a valid document ({document})"
+    if document.oracle != oracle.name:
+        return f"run {run} starts from {document.oracle!r}, not from {oracle.name!r}"
+    exact = oracle.fields(np.array(document.centroids), 0.0 if oracle.unsteady else None)
+    values = np.array(document.values)
+    for k, name in enumerate(_INITIAL_FIELDS):
+        scale = max(float(np.abs(exact[name]).max()), 1e-300)
+        if float(np.abs(values[:, k] - exact[name]).max()) > 1e-12 * scale:
+            return f"run {run} does not start from {oracle.name} at t = 0 ({name})"
+    return None
+
+
 def _family_problem(opened: list[autan.Results]) -> list[str]:
     """Reasons runs cannot form one refinement family: one problem, one solver build, one time."""
     reasons = []
@@ -395,7 +422,10 @@ def _family_problem(opened: list[autan.Results]) -> list[str]:
         doc: dict[str, Any] = results.case.model_dump(mode="json")
         doc.pop("mesh", None)
         doc.pop("name", None)
-        # Face states are exported per mesh: each level names its own file.
+        # Face states and initial states are exported per mesh: each level names its own file
+        # (whether there is one stays part of the case; its content is checked in verify).
+        if doc.get("initial_state") is not None:
+            doc["initial_state"] = "per mesh"
         for rule in doc.get("boundaries", []):
             condition = rule.get("condition") or {}
             if condition.get("kind") == "oracle-state":
@@ -602,6 +632,10 @@ def verify(run_dirs: list[Path], against: str, gate_id: str | None = None) -> di
     if reasons:
         raise VVError("; ".join(reasons), code="V0727")
     oracle = freestream_oracle(opened[0].case) if against == "freestream" else get_oracle(against)
+    for results in opened:
+        problem = _initial_state_problem(results, oracle)
+        if problem:
+            raise VVError(problem, code="V0727")
     runs = [run_errors(results, oracle) for results in opened]
     hs = [r.h for r in runs]
     for r in runs[1:]:

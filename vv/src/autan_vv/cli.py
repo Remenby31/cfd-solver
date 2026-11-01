@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
 
+import autan
 from autan import CaseError
 
 from autan_vv.errors import VVError
@@ -71,6 +73,49 @@ def _cmd_m2_cases(args: argparse.Namespace) -> None:
             path = out / f"{Path(level['file']).stem}.toml"
             path.write_text(case.to_toml())
             _say(str(path))
+
+
+def _cmd_vortex_cases(args: argparse.Namespace) -> None:
+    from autan_vv.cases import vortex  # noqa: PLC0415
+    from autan_vv.initial_state import write_initial_state  # noqa: PLC0415
+    from autan_vv.meshes import vortex as vortex_meshes  # noqa: PLC0415
+    from autan_vv.meshes.families import MANIFEST_SCHEMA, generate_level  # noqa: PLC0415
+    from autan_vv.oracles.inviscid import isentropic_vortex  # noqa: PLC0415
+
+    manifest = json.loads((args.family / "manifest.json").read_text())
+    kind = manifest.get("kind")
+    if manifest.get("schema") != MANIFEST_SCHEMA or kind not in vortex_meshes.KINDS:
+        msg = (
+            f"{args.family} is not a vortex mesh family ({MANIFEST_SCHEMA}, {vortex_meshes.KINDS})"
+        )
+        raise VVError(msg, code="V0805")
+    args.out.mkdir(parents=True, exist_ok=True)
+    out = args.out.resolve()
+    oracle = isentropic_vortex()
+    for level in manifest["levels"]:
+        mesh_file = (args.family / level["file"]).resolve()
+        # The initial state needs the mesh's centroids: the level regenerated from its seed, checked
+        # against the manifest, and the file the case names checked against it too.
+        if hashlib.sha256(mesh_file.read_bytes()).hexdigest() != level["file_sha256"]:
+            msg = f"{level['file']} is not the file its manifest records"
+            raise VVError(msg, code="V0805")
+        mesh, _ = generate_level(kind, level["n"], seed=manifest["seed"])
+        if mesh.sha256() != level["mesh_sha256"]:
+            msg = f"{level['file']} does not regenerate from its manifest"
+            raise VVError(msg, code="V0805")
+        stem = Path(level["file"]).stem
+        state = out / f"{stem}.initial.json"
+        digest = write_initial_state(oracle, mesh, mesh_file, state)
+        case = vortex.case(
+            os.path.relpath(mesh_file, out),
+            level["n"],
+            autan.StateFile(path=state.name, sha256=digest),
+            finest=max(lv["n"] for lv in manifest["levels"]),
+            precision=args.precision,
+        )
+        path = out / f"{stem}.toml"
+        path.write_text(case.to_toml())
+        _say(str(path))
 
 
 def _cmd_forces(args: argparse.Namespace) -> None:
@@ -306,6 +351,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-iterations", type=int, default=200000)
     p.add_argument("--out", type=Path, required=True)
     p.set_defaults(func=_cmd_m2_cases)
+
+    p = sub.add_parser(
+        "vortex-cases",
+        help="write the isentropic-vortex case and initial state of every level of a vortex family",
+    )
+    p.add_argument("--family", type=Path, required=True, help="directory of the mesh manifest")
+    p.add_argument("--precision", choices=("fp64", "fp32+acc64"), default="fp64")
+    p.add_argument("--out", type=Path, required=True)
+    p.set_defaults(func=_cmd_vortex_cases)
 
     p = sub.add_parser(
         "forces", help="continuum forces of a NACA 0012 family and its gates (exit 1 on failure)"
