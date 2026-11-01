@@ -36,6 +36,15 @@ Agreed with the core mesh readers (#1):
 - **Family.** R₁ comes from the paper's finest grid (NC = 4096), so level NC is the 4096² grid with lines removed: levels are nested bit for bit, refinement ratio exactly 2. The lower half mirrors the upper one exactly.
 - **Slab.** The airfoil lies in the x–z plane (lift along +z, as case-schema.md orients α), extruded over y ∈ [0, 1]. Zones `airfoil`, `farfield`, `back` (y = 0), `front` (y = 1). The manifest's `h` is the in-plane size √(area / cells).
 
+## ONERA M6 meshes
+
+`autan-vv meshes onera-m6 --levels 12,24,48 --out DIR` (source `vv/src/autan_vv/meshes/onera_m6.py`) writes tetrahedral meshes `onera-m6-nNNN.msh` for the M2 ONERA M6 case.
+
+- **Wing.** Public definition of Schmitt and Charpin (AGARD AR-138, chapter B1) as Destarac and Dumont restate it for the TMR: root leading edge (0, 0), root trailing edge (0.8059 m, 0), apex of the prolonged trapezoid (1.5787 m, 2.7345 m), semispan 1.1963 m (sweeps 30° and 15.8°, taper 0.5625); every section is the root section (table B1-1, 72 points) scaled about the apex, so the wing is the ruled surface between root and tip; the tip is the tip section revolved about its chord line (half body of revolution, reaching 1.2185 m). The trailing edge is made sharp by extending the last segment of each surface to the chord line, 0.57 % of the chord (the TMR model extends its CAD surfaces by 0.55 %). x/c keeps the original chord. Reference area 0.7532 m² and mean aerodynamic chord 0.64607 m are the trapezoid's.
+- **Domain.** Half sphere y ≥ 0 of radius 20 m (25 root chords) centred at (0.6, 0, 0); zones `wing`, `symmetry` (y = 0 exactly), `farfield`. Axes: x downstream, y spanwise, z up, so the angle of attack turns the flow in the x–z plane.
+- **Construction.** Gmsh OpenCASCADE: splines through the table (vertical tangent at the leading edge, the extended segment at the trailing edge), the upper surface ruled between root and tip, the lower surface its mirror image, the tip revolved; the shell is cut from the half ball. Boolean union of the wing and tip solids damages the surface of revolution, so the wing is assembled from its faces. The tip surface is meshed with MeshAdapt (Frontal-Delaunay cannot mesh its two poles).
+- **Family.** Level n has a size c(y)/n on the wing, a third of it along the edges, growing as 6/n per metre away from the wing; every size scales as 1/n, so n → 2n multiplies the cells by about 7.3 (1.94–1.95 in N^(1/3)): 52 k, 366 k and 2.75 M tetrahedra for n = 12, 24, 48 (n = 48 takes 4 min and 12 GB on a laptop). Netgen's optimiser removes the flat tetrahedra Delaunay leaves: largest face non-orthogonality 53° at n = 24 instead of 70°. A faster growth (20) makes Gmsh 4.15 produce faces shared by three tetrahedra. Single-threaded Gmsh with a fixed seed regenerates a level bit for bit.
+
 ## Manifest and reproducibility
 
 Each family directory has `manifest.json` (schema `autan.mesh-family/1`): kind, perturbation, seed, Gmsh version, and per level the file name, `file_sha256`, `mesh_sha256` (topology and coordinates, format-independent), counts per cell type, total volume, h = (V/N)^(1/3) and `min_subvolume_ratio`. The same seed, Gmsh version and platform give byte-identical files; a different seed gives different files (`test_families_regenerate_bit_for_bit`).
@@ -53,6 +62,8 @@ Gmsh is GPL-2.0-or-later. It is a development-only dependency group of `vv/`, ne
 ## References
 
 - T. J. Barth, Aspects of unstructured grids and finite-volume solvers for the Euler and Navier-Stokes equations, VKI Lecture Series 1994-05, 1994 (median dual).
+- D. Destarac and A. Dumont, ONERA M6 wing test-case, original and TMR, 2016 (TMR, `Onerawingnumerics_val/ONERA_M6_Test_Case_TMR.pdf`).
 - C. Geuzaine and J.-F. Remacle, Gmsh: a 3-D finite element mesh generator with built-in pre- and post-processing facilities, *Int. J. Numer. Meth. Eng.* 79(11):1309–1331, 2009. doi:10.1002/nme.2579
 - H. W. Kuhn, Some combinatorial lemmas in topology, *IBM J. Res. Dev.* 4(5):518–524, 1960 (cube triangulation).
+- V. Schmitt and F. Charpin, Pressure distributions on the ONERA-M6-wing at transonic Mach numbers, AGARD AR-138, chapter B1, 1979.
 - J. C. Vassberg and A. Jameson, In pursuit of grid convergence for two-dimensional Euler solutions, *J. Aircraft* 47(4):1152–1166, 2010. doi:10.2514/1.46737

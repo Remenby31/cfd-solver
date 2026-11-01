@@ -38,6 +38,10 @@ def _cmd_meshes(args: argparse.Namespace) -> None:
         from autan_vv.meshes import naca0012  # noqa: PLC0415
 
         family, _ = naca0012.generate_family(args.levels, args.out)
+    elif args.kind == "onera-m6":
+        from autan_vv.meshes import onera_m6  # noqa: PLC0415
+
+        family, _ = onera_m6.generate_family(args.levels, args.out, seed=args.seed)
     else:
         from autan_vv.meshes.families import generate_family  # noqa: PLC0415
 
@@ -49,13 +53,26 @@ def _cmd_meshes(args: argparse.Namespace) -> None:
 
 
 def _cmd_m2_cases(args: argparse.Namespace) -> None:
-    from autan_vv.cases import naca0012  # noqa: PLC0415
+    from autan_vv.cases import naca0012, onera_m6  # noqa: PLC0415
     from autan_vv.meshes.families import MANIFEST_SCHEMA  # noqa: PLC0415
 
     manifest = json.loads((args.family / "manifest.json").read_text())
-    if manifest.get("schema") != MANIFEST_SCHEMA or manifest.get("kind") != "naca0012":
-        msg = f"{args.family} is not a naca0012 mesh family ({MANIFEST_SCHEMA})"
+    if manifest.get("schema") != MANIFEST_SCHEMA or manifest.get("kind") != args.case:
+        msg = f"{args.family} is not a {args.case} mesh family ({MANIFEST_SCHEMA})"
         raise VVError(msg, code="V0805")
+    if args.case == "onera-m6":
+        args.out.mkdir(parents=True, exist_ok=True)
+        for level in manifest["levels"]:
+            mesh = (args.family / level["file"]).resolve()
+            case = onera_m6.case(
+                os.path.relpath(mesh, args.out),
+                precision=args.precision,
+                max_iterations=args.max_iterations,
+            )
+            path = args.out / f"{Path(level['file']).stem}.toml"
+            path.write_text(case.to_toml())
+            _say(str(path))
+        return
     for condition in naca0012.CONDITIONS:
         out = args.out / condition
         out.mkdir(parents=True, exist_ok=True)
@@ -98,6 +115,37 @@ def _cmd_forces(args: argparse.Namespace) -> None:
     for verdict in report["verdicts"]:
         _say(f"gate {verdict['gate']}: {'PASS' if verdict['pass'] else 'FAIL'}{note}")
     if not report["pass"]:
+        raise SystemExit(1)
+
+
+def _cmd_sections(args: argparse.Namespace) -> None:
+    from autan_vv.cases import onera_m6  # noqa: PLC0415
+
+    report = onera_m6.study(args.run, args.experiment)
+    if args.out is not None:
+        args.out.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    drop = report["residual_drop"]
+    _say(
+        "residual drop: "
+        + ", ".join(f"{k} {'-' if v is None else f'{v:.1f}'}" for k, v in drop.items())
+    )
+    for row in report["sections"]:
+        gap = row["rear_shock_gap"]
+        rms = row["cp_rms_off_shocks"]
+        _say(
+            f"eta {row['eta']:.2f}: shocks experiment "
+            f"{[round(v, 3) for v in row['shocks_experiment']]}, "
+            f"computed {[round(v, 3) for v in row['shocks_computed']]}, "
+            f"rear gap {'-' if gap is None else f'{gap:.3f}'}, "
+            f"Cp RMS {'-' if rms is None else f'{rms:.3f}'}"
+        )
+    gate = report["gate"]
+    if gate is None:
+        _say(f"no residual gate in {report['precision']}: compare forces and Cp with fp64")
+        return
+    note = "" if report["evidence"] else " (not evidence: fake backend)"
+    _say(f"gate {gate['id']}: {'PASS' if gate['pass'] else 'FAIL'}{note}")
+    if not gate["pass"]:
         raise SystemExit(1)
 
 
@@ -204,7 +252,8 @@ def main(argv: list[str] | None = None) -> int:
         "meshes", help="generate a seeded mesh family of the unit cube, or the NACA 0012 O-meshes"
     )
     p.add_argument(
-        "kind", choices=("tet", "hex", "prism", "hybrid", "poly", "agglomerated", "naca0012")
+        "kind",
+        choices=("tet", "hex", "prism", "hybrid", "poly", "agglomerated", "naca0012", "onera-m6"),
     )
     p.add_argument("--levels", type=_levels, default=(8, 16, 32, 64))
     p.add_argument("--perturbation", type=float, default=0.0)
@@ -213,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=_cmd_meshes)
 
     p = sub.add_parser("m2-cases", help="write the NACA 0012 cases of every condition and level")
-    p.add_argument("case", choices=("naca0012",))
+    p.add_argument("case", choices=("naca0012", "onera-m6"))
     p.add_argument("--family", type=Path, required=True, help="directory of the mesh manifest")
     p.add_argument("--precision", choices=("fp64", "fp32+acc64"), default="fp64")
     p.add_argument("--max-iterations", type=int, default=200000)
@@ -227,6 +276,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("runs", type=Path, nargs="+", help="run directories of one condition")
     p.add_argument("--out", type=Path, help="write the report (autan.vv-force-study/1) as JSON")
     p.set_defaults(func=_cmd_forces)
+
+    p = sub.add_parser(
+        "sections", help="ONERA M6 run: residual-drop gate, Cp sections and shocks against run 2308"
+    )
+    p.add_argument("run", type=Path, help="run directory")
+    p.add_argument(
+        "--experiment",
+        type=Path,
+        required=True,
+        help="case_2308.dat (autan-vv cases fetch onera-m6)",
+    )
+    p.add_argument("--out", type=Path, help="write the report (autan.vv-onera-m6/1) as JSON")
+    p.set_defaults(func=_cmd_sections)
 
     p = sub.add_parser(
         "order", help="observed order from errors on a mesh family (JSON in, JSON out)"

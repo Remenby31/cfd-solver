@@ -49,6 +49,23 @@ autan-vv forces naca0012 runs/<one run per level> --out study.json           # e
 - **Tests** (`vv/tests/test_naca0012.py`): the geometry to every digit of the paper's eqs. 4–8 and 11; the continuum and order of the paper's Tables 2, 3 and 9 from their three finest grids; the gates on FLO82's sequences, including its |CD| rise from 256² to 512² at M 0.5, which fails the monotonic test; a family of fake-backend runs read back through `autan.Results`.
 - **Far field.** The CL band of the M 0.8, α 1.25° gate comes from point-vortex far-field runs; the Euler far field takes the uniform freestream. The correction is requested from the Euler lane in #186.
 
+## ONERA M6 inviscid
+
+Run 2308 of Schmitt and Charpin (M 0.8395, α 3.06°) in Euler, on the [ONERA M6 family](meshes.md#onera-m6-meshes) (source `vv/src/autan_vv/cases/onera_m6.py`).
+
+```sh
+autan-vv meshes onera-m6 --levels 12,24,48 --out meshes/onera-m6
+autan-vv m2-cases onera-m6 --family meshes/onera-m6 --out cases/onera-m6
+autan-vv cases fetch onera-m6                                              # case_2308.dat
+autan-vv sections runs/<run> --experiment ~/.cache/autan-vv/onera-m6/case_2308.dat --out m6.json
+```
+
+- **Case.** Slip `wing`, `symmetry`, `farfield`, FP64, steady to 10 orders; forces on the wing with reference area 0.7532 m² and length 0.64607 m.
+- **Run check.** The run must be this case on its mesh, up to precision, iteration budget and monitors (`V0801`): Mach, α, physics, gas and boundaries included.
+- **Gate** `onera-m6-residual-drop`, in `fp64` only: the run ended `converged` under a criterion of at least 10 orders, as the runtime applies it (reference residuals of the original run, exempt zero equations, [case-schema.md](../contracts/case-schema.md#time)); the report also gives each residual's drop. Evidence only off the fake backend; exit 1 when it fails. In `fp32+acc64` there is no residual gate (acceptance.md compares forces and Cp with `fp64`).
+- **Report.** The wall pressure (`WallSolution`) becomes Cp with the freestream's p and q; it is averaged to the nodes (area-weighted) and interpolated linearly where the wing's edges cross the plane y = η b of each of the seven stations; x/c uses the original local chord. The shock position is the rearmost rise of the upper-surface Cp through the critical Cp* (sonic), by linear interpolation, for the computation and for the taps alike; at η = 0.20, 0.44, 0.65 the report says whether the rear shocks lie within 0.03 of each other. The Cp RMS difference with the taps leaves out taps within 0.05 of a rise through Cp* on their surface, computed or measured.
+- **Tests** (`vv/tests/test_onera_m6.py`): the section table against rows typed from the TMR document and, with `-m network`, against NPARC's `airfoil.txt`; planform against the published sweeps, taper, area, MAC and the TMR's trailing-edge extension; mesh nodes on the conical surface, symmetry plane, far-field sphere, closed boundary; regeneration bit for bit; Cp* against the isentropic relation; the cut exact for linear fields; a run written through `autan`'s writers read back and cut, and runs at another incidence refused; the TMR and NPARC transcriptions of run 2308 give the same shocks (`-m network`).
+
 ## Licences
 
 TMR repository: CC0-1.0. nasa.gov archives and NPARC (grc.nasa.gov) pages: US Government works with no stated restriction. Nothing is vendored: files are fetched by hash at use time.
