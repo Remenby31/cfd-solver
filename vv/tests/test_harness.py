@@ -216,8 +216,15 @@ def test_mms_order_gates_check_every_listed_field(
     assert not next(c for c in verdict["checks"] if c.get("field") == gated)["pass"]
 
 
-def test_vortex_gate_checks_exactly_zero_components_and_its_prerequisites(tmp_path: Path) -> None:
-    meshes = _planar(tmp_path, (16, 24, 32, 48))
+@pytest.mark.parametrize("source", ["planar", "vortex-hex", "vortex-prism"])
+def test_vortex_gate_checks_exactly_zero_components_and_its_prerequisites(
+    tmp_path: Path, source: str
+) -> None:
+    # The gate's own mesh families (autan-vv meshes vortex-*) refine one domain, as it requires.
+    if source == "planar":
+        meshes = _planar(tmp_path, (16, 24, 32, 48))
+    else:
+        meshes = _family(tmp_path, source, (8, 16, 32, 64))
     runs = _runs(tmp_path, meshes, "isentropic-vortex", 2.0, amplitude=0.005, time=40.0)
     verdict = verify(runs, "isentropic-vortex", "vortex-order")["verdict"]
     rhow = next(c for c in verdict["checks"] if c.get("field") == "rhow")

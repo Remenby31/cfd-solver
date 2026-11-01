@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from autan_vv.errors import VVError
-from autan_vv.meshes import ringleb
+from autan_vv.meshes import ringleb, vortex
 from autan_vv.meshes.dual import median_dual
 from autan_vv.meshes.facemesh import FaceMesh, FloatArray, IntArray, from_faces, merge_cells
 from autan_vv.meshes.fluent import write_fluent
@@ -419,8 +419,11 @@ def _write_msh(
     cells: dict[str, IntArray],
     boundary: dict[str, IntArray],
     path: Path,
+    periodic: tuple[tuple[str, str, tuple[float, float, float]], ...] = (),
 ) -> None:
-    """Write arrays as MSH 4.1 ASCII through a discrete Gmsh model, so the file is exactly the arrays."""
+    """Write arrays as MSH 4.1 ASCII through a discrete Gmsh model, so the file is exactly the arrays.
+    Each (zone a, zone b, translation) of `periodic` becomes a `$Periodic` surface link, b the
+    translate of a (mesh.md, Periodic pairs: the reader pairs the faces by geometry)."""
     gmsh.model.add("export")
     volume = gmsh.model.addDiscreteEntity(3)
     gmsh.model.mesh.addNodes(
@@ -438,8 +441,10 @@ def _write_msh(
                 (conn + 1).ravel().tolist(),
             )
             tag += conn.shape[0]
+    surfaces: dict[str, int] = {}
     for name, faces in boundary.items():
         surface = gmsh.model.addDiscreteEntity(2)
+        surfaces[name] = surface
         for k, gmsh_type in ((3, 2), (4, 3)):
             rows = faces[(faces >= 0).sum(axis=1) == k][:, :k]
             if rows.size:
@@ -452,6 +457,9 @@ def _write_msh(
                 tag += rows.shape[0]
         gmsh.model.addPhysicalGroup(2, [surface], name=name)
     gmsh.model.addPhysicalGroup(3, [volume], name=CELL_ZONE)
+    for a, b, (tx, ty, tz) in periodic:
+        affine = [1.0, 0.0, 0.0, tx, 0.0, 1.0, 0.0, ty, 0.0, 0.0, 1.0, tz, 0.0, 0.0, 0.0, 1.0]
+        gmsh.model.mesh.setPeriodic(2, [surfaces[b]], [surfaces[a]], affine)
     gmsh.write(str(path))
     gmsh.model.remove()
 
@@ -477,11 +485,14 @@ def generate_level(
     ASCII. The file holds exactly the in-memory mesh: coordinates are rounded to the 16 significant
     digits Gmsh writes.
     """
-    if kind not in (*KINDS, "ringleb"):
-        msg = f"unknown mesh kind {kind!r}; expected one of {KINDS} or 'ringleb'"
+    if kind not in (*KINDS, "ringleb", *vortex.KINDS):
+        msg = f"unknown mesh kind {kind!r}; expected one of {KINDS}, 'ringleb' or {vortex.KINDS}"
         raise VVError(msg, code="V0304")
     if kind == "ringleb" and perturbation > 0.0:
         msg = "the Ringleb mesh follows the flow's streamlines and is not perturbed"
+        raise VVError(msg, code="V0309")
+    if kind in vortex.KINDS and perturbation > 0.0:
+        msg = f"{kind} is nested and periodic: it carries its own seeded jitter, not a perturbation"
         raise VVError(msg, code="V0309")
     if not (0.0 <= perturbation < 1.0) or n < 1:
         msg = f"need 0 <= perturbation < 1 and n >= 1, got {perturbation} and {n}"
@@ -495,8 +506,13 @@ def generate_level(
         gmsh.option.setNumber("Mesh.Binary", 0)
         gmsh.option.setNumber("Mesh.SaveAll", 0)
         version = str(gmsh.__version__)
+        periodic: tuple[tuple[str, str, tuple[float, float, float]], ...] = ()
         if kind == "ringleb":
             points, cells, boundary = ringleb.grid(n)
+        elif kind in vortex.KINDS:
+            points, cells = vortex.grid(kind, n, seed)
+            boundary = _box_boundary(points, cells)
+            periodic = vortex.PERIODIC
         else:
             if kind == "hybrid":
                 points, cells = _structured_hybrid(n)
@@ -518,7 +534,7 @@ def generate_level(
         else:
             mesh = _to_facemesh(points, cells, boundary)
             if path is not None:
-                _write_msh(gmsh, points, cells, boundary, path)
+                _write_msh(gmsh, points, cells, boundary, path, periodic)
     finally:
         gmsh.finalize()
     mesh.check()

@@ -276,11 +276,22 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser(
         "meshes",
         help="generate a seeded mesh family of the unit cube, of the Ringleb domain with its face"
-        " states, or the NACA 0012 O-meshes",
+        " states, of the periodic square of the isentropic vortex, or the NACA 0012 O-meshes",
     )
     p.add_argument(
         "kind",
-        choices=("tet", "hex", "prism", "hybrid", "poly", "agglomerated", "ringleb", "naca0012"),
+        choices=(
+            "tet",
+            "hex",
+            "prism",
+            "hybrid",
+            "poly",
+            "agglomerated",
+            "ringleb",
+            "vortex-hex",
+            "vortex-prism",
+            "naca0012",
+        ),
     )
     p.add_argument("--levels", type=_levels, default=(8, 16, 32, 64))
     p.add_argument("--perturbation", type=float, default=0.0)
