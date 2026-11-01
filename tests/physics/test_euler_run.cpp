@@ -470,6 +470,59 @@ TEST_CASE("a steady multigrid case with periodic pairs is refused before any dir
   CHECK(diagnostic["location"]["path"] == "time.linear_solver");
 }
 
+TEST_CASE("a case with an initial-state file starts from the file's states", "[euler]") {
+  // initial-state.md: the file gives every cell the freestream while both cell zones start at
+  // twice its density. Started from the file, the flow is uniform with farfield all around and
+  // stays so; started from the zones, it would not.
+  const char* precision = GENERATE("fp64", "fp32+acc64");
+  INFO(precision);
+  const autan::Mesh mesh = autan::io::read_mesh(mesh_path);
+  const autan::Geometry g = autan::compute_geometry(mesh);
+  Json doc = input("hybrid.solver-input.json", [&](Json& d) {
+    inviscid_along_x(d, precision);
+    for (auto& b : d["boundaries"]) b["kind"] = "farfield";
+    for (auto& z : d["cell_zones"]) {
+      z["initial"]["density"] = 2.0 * d["freestream"]["density"].get<double>();
+    }
+    d["time"] = {{"kind", "unsteady"},
+                 {"steps", 3},
+                 {"dt", nullptr},
+                 {"cfl", 0.8},
+                 {"average_from", nullptr}};
+  });
+  const auto& f = doc["freestream"];
+  const double rho = f["density"].get<double>(), p = f["pressure"].get<double>();
+  const double speed = f["speed"].get<double>();
+  Json centroids = Json::array(), values = Json::array();
+  for (std::size_t c = 0; c < static_cast<std::size_t>(mesh.n_cells()); ++c) {
+    centroids.push_back({g.cell_centroid_x[c], g.cell_centroid_y[c], g.cell_centroid_z[c]});
+    values.push_back({rho, speed, 0.0, 0.0, p});
+  }
+  const Json state{{"schema", "autan.initial-state/1"},
+                   {"oracle", "freestream"},
+                   {"mesh_sha256", autan::io::mesh_hash(mesh_path)},
+                   {"variables", {"density", "velocity-x", "velocity-y", "velocity-z", "pressure"}},
+                   {"cells", mesh.n_cells()},
+                   {"centroids", centroids},
+                   {"values", values}};
+  std::random_device random;
+  const fs::path file = fs::temp_directory_path() / ("autan_initial-" + std::to_string(random()));
+  std::ofstream(file) << state.dump();
+  std::string sha;
+  picosha2::hash256_hex_string(read(file), sha);
+  doc["initial_state"] = {{"path", file.string()}, {"sha256", sha}};
+  const auto out = run(doc);
+  INFO(out.err);
+  REQUIRE(out.status == ExitStatus::finished);
+  const double eps = std::string(precision) == "fp64" ? std::numeric_limits<double>::epsilon()
+                                                      : std::numeric_limits<float>::epsilon();
+  for (const double v : field(out.run, "Density")) CHECK(std::abs(v - rho) <= 64 * eps * rho);
+  for (const double v : field(out.run, "Pressure")) CHECK(std::abs(v - p) <= 64 * eps * p);
+  for (const double v : field(out.run, "VelocityX")) {
+    CHECK(std::abs(v - speed) <= 64 * eps * speed);
+  }
+}
+
 TEST_CASE("a uniform flow through periodic pairs stays uniform", "[euler]") {
   // Image ghosts hold their owners' values: a uniform flow crossing both pairs is steady.
   const char* precision = GENERATE("fp64", "fp32+acc64");

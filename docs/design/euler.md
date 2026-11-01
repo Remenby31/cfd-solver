@@ -76,6 +76,8 @@ Steps to ten orders: [multigrid.md](multigrid.md#measurements). A Newton-Krylov 
 
 Unsteady runs use SSP-RK3 (Shu and Osher 1988) with one global time step from `dt` or `cfl`.
 
+Start: each cell takes its zone's `initial` state, or, with an initial-state file ([initial-state.md](../contracts/initial-state.md)), its row of the file; `autan_vv.initial_state.write_initial_state` writes one from an oracle (the isentropic vortex) at the cell centroids.
+
 Restart: `restart_fields` holds the conserved variables bit for bit, the averaging sums, and the steady solver's state (penalty, order, reference residuals) as uniform fields, so that `continue` reproduces the uninterrupted run (`tests/physics/test_euler_run.cpp`).
 
 ## Partitions
