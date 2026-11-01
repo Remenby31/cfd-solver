@@ -24,6 +24,12 @@ inline int& stencil_slice() {
   return slice;
 }
 
+/// Cells per slice of the incidence layout of every DeviceMesh built afterwards (0: CSR).
+inline int& incidence_slice() {
+  static int slice = 0;
+  return slice;
+}
+
 template <class T>
 class DeviceArray {
  public:
@@ -64,7 +70,7 @@ struct DeviceMesh {
   DeviceMesh(const SpikeMesh& m, int block, const autan::kernels::GlobalKeys& keys)
       : mesh(m.mesh, m.packed, m.topo.stencil != nullptr ? &m.stencil : nullptr,
              {block, kScratchWidth, kIncidenceScratchWidth, nullptr, stencil_slice(),
-              m.global ? &keys : nullptr}),
+              m.global ? &keys : nullptr, incidence_slice()}),
         topo(mesh.topology()),
         schedule(mesh.schedule()) {}
   template <class D>

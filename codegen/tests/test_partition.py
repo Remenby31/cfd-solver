@@ -61,7 +61,8 @@ def test_results_are_bit_identical_across_rank_counts(backend: str, kind: str, w
     # Ordered by the global numbering (runtime.md, Ranks), a cell sums its faces by global face
     # id and a face is evaluated in its global orientation, so every owned cell of a 2-rank
     # partition holds the bits of the same cell of a 1-rank partition. Compared: the advection
-    # face loop, the face2 stencil gradient and the incidence LSQ gradient with its bounds. The
+    # face loop, the face2 stencil gradient, the incidence LSQ gradient with its bounds, and the
+    # sides of the cell's faces (geometry.incidence_side). The
     # advection-diffusion residual is not: it reads ghost gradients, which a solver fills by a
     # halo exchange between the two loops and this test does not.
     if where != "host" and backend == "metal":
@@ -84,8 +85,15 @@ def test_results_are_bit_identical_across_rank_counts(backend: str, kind: str, w
             adv = s.gpu_advection(m, "fp64", where, 64, q[cells], grad[cells], mms.VELOCITY)
             _, stencil_grad, _ = s.gpu_advdiff_residual(m, "fp64", where, 64, *args)
             lsq, lo, hi = s.gpu_gradients(m, "fp64", "lsq", where, 64, q[cells], q_b[faces])
+        # Each cell's faces by global id with their sides (+1 for the global left cell).
+        off, cell_faces, side = s.incidences(m)
+        sides = [
+            faces[cell_faces[off[c] : off[c + 1]]] * side[off[c] : off[c + 1]]
+            for c in range(m.n_owned)
+        ]
         return {
             int(cells[c]): b"".join(a[c].tobytes() for a in (adv, stencil_grad, lsq, lo, hi))
+            + sides[c].tobytes()
             for c in range(m.n_owned)
         }
 

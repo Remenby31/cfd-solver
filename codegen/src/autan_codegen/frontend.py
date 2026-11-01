@@ -50,6 +50,7 @@ INTRINSIC_ARITY = {
     "norm": 1,
     "transpose": 1,
     "inverse": 1,
+    "identity": 1,
     "dot": 2,
     "cross": 2,
     "outer": 2,
@@ -68,6 +69,7 @@ INTRINSICS = UNARY_MATH | {
     "Vec5",
     "transpose",
     "inverse",
+    "identity",
     "outer",
     "abs",
     "min",
@@ -411,6 +413,12 @@ class _Builder:
                 raise self.err(Code.TYPE_MISMATCH, "transpose takes a matrix")
             n, m = a.shape
             return Arr(tuple(a.ids[i * m + j] for j in range(m) for i in range(n)), (m, n))
+        if fname == "identity":
+            (n,) = args
+            if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+                raise self.err(Code.TYPE_MISMATCH, "identity takes a constant size")
+            one, zero = self.real(1.0), self.real(0.0)
+            return Arr(tuple(one if i == j else zero for i in range(n) for j in range(n)), (n, n))
         if fname == "inverse":
             (a,) = args
             if not (isinstance(a, Arr) and len(a.shape) == 2 and a.shape[0] == a.shape[1]):

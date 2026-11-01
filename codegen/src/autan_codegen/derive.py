@@ -9,6 +9,7 @@ source's adjoint, and a write's adjoint reads the target's adjoint and then zero
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass, field
 
 from autan_codegen import dsl
@@ -18,21 +19,23 @@ from autan_codegen.frontend import Signature
 from autan_codegen.ir import Function, Instr, dce
 from autan_codegen.model import LoopModel, Module
 
-_TAN: dict[int, dsl.Dataset] = {}
-_ADJ: dict[int, dsl.Dataset] = {}
+# Keyed by the dataset itself, weakly: an id() key outlives its dataset and can be reused by
+# another one when one process generates several modules.
+_TAN: weakref.WeakKeyDictionary[dsl.Dataset, dsl.Dataset] = weakref.WeakKeyDictionary()
+_ADJ: weakref.WeakKeyDictionary[dsl.Dataset, dsl.Dataset] = weakref.WeakKeyDictionary()
 
 
 def tan_ds(d: dsl.Dataset) -> dsl.Dataset:
-    if id(d) not in _TAN:
-        _TAN[id(d)] = dsl.Dataset(f"{d.name}_tan", d.set, d.type)
-    return _TAN[id(d)]
+    if d not in _TAN:
+        _TAN[d] = dsl.Dataset(f"{d.name}_tan", d.set, d.type)
+    return _TAN[d]
 
 
 def adj_ds(d: dsl.Dataset) -> dsl.Dataset:
     """Adjoints accumulate in the accumulation type (research section 7, adjoint rows)."""
-    if id(d) not in _ADJ:
-        _ADJ[id(d)] = dsl.Dataset(f"{d.name}_adj", d.set, dsl.Type(dsl.Role.RESIDUAL, d.type.shape))
-    return _ADJ[id(d)]
+    if d not in _ADJ:
+        _ADJ[d] = dsl.Dataset(f"{d.name}_adj", d.set, dsl.Type(dsl.Role.RESIDUAL, d.type.shape))
+    return _ADJ[d]
 
 
 def _is_active(b: dsl.Binding) -> bool:
@@ -243,6 +246,12 @@ def derive(m: Module) -> None:
             lm.fin_sig is not None
             and bool(_active(lm.fin_sig, lm.loop.finalise_bindings, skip=len(lm.loop.outputs)))
         )
+        accum = lm.fn.compute == "accum" or (lm.fin_fn is not None and lm.fin_fn.compute == "accum")
+        if has_active and (lm.loop.entries or accum):
+            raise CodegenError(
+                Code.AD_UNSUPPORTED,
+                f"{lm.name}: per-entry outputs and compute='accum' bodies take no active data",
+            )
         if not has_active or lm.kind == "boundary_write":
             # Nothing active flows in: the tangent output is zero and there is no adjoint to send.
             continue

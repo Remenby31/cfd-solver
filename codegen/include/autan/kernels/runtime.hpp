@@ -57,6 +57,15 @@ struct Topology {
   /// and boundary loops accept only the gather strategies (E1109), whose per-cell order is the
   /// global one; scatter, atomic and coloured orders follow the local numbering.
   bool rank_independent = false;
+  /// Sliced incidence layout (autan::kernels::sliced_incidences): entry j of cell c is at
+  /// cell_face_offsets[c] + j * incidence_stride for j < incidence_length[c], and n_incidences
+  /// counts the padding; incidence_cell[k] is the cell across the incidence's face (-1 on a
+  /// boundary face), so a reduction reads no owner or neighbour. Every per-incidence array
+  /// (cell_faces, incidence_twin, incidence data) follows the layout. incidence_stride == 1 is
+  /// the CSR layout, where incidence_cell may be null.
+  offset_t incidence_stride = 1;
+  const index_t* incidence_length = nullptr;
+  const index_t* incidence_cell = nullptr;
 };
 
 /// Precision policies (docs/research/kernel-generator.md section 7): storage type of each role,

@@ -37,8 +37,10 @@ set(AUTAN_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 
 set(AUTAN_GENERATED_FILES)
 set(AUTAN_GENERATED_GPU_UNITS)
-# Test kernels (codegen/tests/kernels) are built into the spike library only.
-set(AUTAN_TEST_KERNEL_MODULES face_weighted)
+# Test kernels (codegen/tests/kernels) are built into the spike library and the loop benchmark only.
+set(AUTAN_TEST_KERNEL_MODULES diagonal_only face_weighted)
+# Modules with bodies computing in the accumulation type, which Metal cannot divide in (E1013).
+set(AUTAN_ACCUM_MODULES blocks diagonal_only)
 foreach(module IN LISTS AUTAN_KERNEL_MODULES AUTAN_TEST_KERNEL_MODULES)
   if(module IN_LIST AUTAN_TEST_KERNEL_MODULES)
     set(module_source ${CMAKE_CURRENT_SOURCE_DIR}/tests/kernels/${module}.py)
@@ -46,8 +48,7 @@ foreach(module IN LISTS AUTAN_KERNEL_MODULES AUTAN_TEST_KERNEL_MODULES)
     set(module_source ${PROJECT_SOURCE_DIR}/kernels/${module}.py)
   endif()
   set(module_backends ${AUTAN_KERNEL_BACKENDS})
-  if(module STREQUAL "blocks")
-    # Its inverse computes in the accumulation type, which Metal cannot divide in (E1013).
+  if(module IN_LIST AUTAN_ACCUM_MODULES)
     list(REMOVE_ITEM module_backends metal)
   endif()
   set(outputs ${AUTAN_GENERATED_DIR}/${module}.hpp)

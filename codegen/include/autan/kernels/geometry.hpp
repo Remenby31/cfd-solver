@@ -111,6 +111,27 @@ struct SlicedStencil {
 };
 SlicedStencil sliced(const CellStencil& csr, int slice);
 
+/// The cell -> face incidences of `csr` (a Topology in CSR layout, with incidence_twin) in the
+/// sliced layout of SlicedStencil (Topology::incidence_stride): cell_face_offsets holds n_cells + 1
+/// starts (the last the total size, padding included), `cell` the cell across each incidence's
+/// face (-1 on boundary faces and padding), twins sliced positions. Each cell keeps its faces in
+/// the same order, so a reduction gives the same bits. Padding holds face 0.
+struct SlicedIncidences {
+  std::vector<offset_t> cell_face_offsets;
+  std::vector<index_t> length;
+  std::vector<offset_t> position;
+  std::vector<index_t> cell_faces;
+  std::vector<index_t> cell;
+  std::vector<offset_t> twin;
+  offset_t stride = 1;
+};
+SlicedIncidences sliced_incidences(const Topology& csr, int slice);
+
+/// Per-incidence data (`comps` x n_incidences, component-major) moved to the sliced positions of
+/// `s` (`comps` x its total size), padding 0.
+std::vector<double> sliced_values(const SlicedIncidences& s, const std::vector<double>& csr,
+                                  int comps);
+
 /// Copy of `v` converted to T (the storage type of a precision role).
 template <class T>
 std::vector<T> converted(const std::vector<double>& v) {

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from autan_codegen import dsl
 from autan_codegen.derive import ReduceAdjoint
-from autan_codegen.emit_cpp import Emitter, at, call_args
+from autan_codegen.emit_cpp import Emitter, at, call_args, incidence_loop
 from autan_codegen.emit_cpu import (
     boundary_write_body,
     cell_stores,
@@ -193,9 +193,7 @@ def emit_face_kernels(e: Emitter, lm: LoopModel) -> None:
         e.w("    return;")
         e.w("  }")
         e.w(f"  A acc[{n}] = {{}};")
-        e.w(
-            "  for (offset_t k = d.topo.cell_face_offsets[c]; k < d.topo.cell_face_offsets[c + 1]; ++k) {"
-        )
+        e.w(incidence_loop("  "))
         e.w("    const index_t f = d.topo.cell_faces[k];")
         # Faces outside the loop's range (halo faces, other kind) were not evaluated.
         cond = (

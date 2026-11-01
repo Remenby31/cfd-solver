@@ -26,6 +26,7 @@
 #include "blocks_cpu.hpp"
 #include "blocks_gpu.cuh"
 #include "device.cuh"
+#include "diagonal_only_gpu.cuh"
 #include "gradients_cpu.hpp"
 #include "gradients_gpu.cuh"
 #include "revision.h"
@@ -405,6 +406,85 @@ void run(const Options& o, const SpikeMesh& m, std::vector<Timed>& out, bool& ve
   if (max_rel_diff(as_double(dinv.download()), as_double(hinv)) > tolerance) verified = false;
   out.push_back({"block_inverse", cells * 50.0 * sizeof(A), "cell",
                  time_it(o, [&] { bk::gpu_loops::invert_diagonal(db, dm.schedule); })});
+
+  // The block matrix (kernels/blocks.py): `assemble` from random face and boundary blocks and a
+  // shift, then y = A x, in the CSR and the sliced incidence layout (Topology::incidence_stride).
+  using J = typename P::jac;
+  std::vector<J> hjac(50 * nf), hbnd(25 * nf);
+  for (auto& v : hjac) v = J(normal(rng));
+  for (auto& v : hbnd) v = J(normal(rng));
+  std::vector<A> hshift(nc), hdiag2(25 * nc);
+  for (auto& v : hshift) v = A(6.0 + normal(rng));
+  std::vector<J> hoff(25 * static_cast<std::size_t>(t.n_incidences));
+  std::vector<R> hx(5 * nc), hy(5 * nc);
+  for (auto& v : hx) v = R(normal(rng));
+  bk::Data<P> hm = hb;
+  hm.face_jac = hjac.data();
+  hm.bnd_jac = hbnd.data();
+  hm.shift = hshift.data();
+  hm.diag = hdiag2.data();
+  hm.off = hoff.data();
+  hm.x = hx.data();
+  hm.y = hy.data();
+  autan::spike::bind(hm.incidence_side, hg.incidence_side);
+  bk::cpu::assemble(hm);
+  bk::cpu::multiply(hm);
+  DeviceArray<J> djac(hjac), dbnd(hbnd);
+  DeviceArray<A> dshift(hshift), ddiag2(25 * nc);
+  DeviceArray<R> dx(hx), dy(5 * nc);
+  const double nbf = static_cast<double>(t.n_faces) - ni;
+  for (const int slice : {0, 32}) {
+    autan::spike::incidence_slice() = slice;
+    DeviceMesh dl(m, o.block);
+    autan::spike::incidence_slice() = 0;
+    bk::Data<P> dd{};
+    dl.bind(dd);
+    DeviceArray<J> doff(25 * static_cast<std::size_t>(dl.topo.n_incidences));
+    dd.face_jac = djac.get();
+    dd.bnd_jac = dbnd.get();
+    dd.shift = dshift.get();
+    dd.diag = ddiag2.get();
+    dd.off = doff.get();
+    dd.x = dx.get();
+    dd.y = dy.get();
+    bk::gpu_loops::assemble(dd, dl.schedule);
+    bk::gpu_loops::multiply(dd, dl.schedule);
+    if (max_rel_diff(as_double(ddiag2.download()), as_double(hdiag2)) > tolerance ||
+        max_rel_diff(as_double(dy.download()), as_double(hy)) > tolerance) {
+      verified = false;
+    }
+    // Analytic minima. Assembly: per cell its offset, shift and diagonal block; per incidence
+    // its face, side and off-diagonal block; per interior face its two blocks and its owner and
+    // neighbour; per boundary face its block. Product: per cell its offset, diagonal block, x
+    // and y; per incidence its block and the cell across (the sliced column index, or the face
+    // and its owner and neighbour in CSR).
+    const double row = slice > 0 ? sizeof(offset_t) + sizeof(index_t) : sizeof(offset_t);
+    const double asm_bytes =
+        cells * (row + 26.0 * sizeof(A)) +
+        inc * (sizeof(index_t) + sizeof(*dd.incidence_side) + 25.0 * sizeof(J)) +
+        ni * (50.0 * sizeof(J) + 2 * sizeof(index_t)) + nbf * 25.0 * sizeof(J);
+    const double mul_bytes = cells * (row + 25.0 * sizeof(A) + 10.0 * sizeof(R)) +
+                             inc * (25.0 * sizeof(J) + sizeof(index_t)) +
+                             (slice > 0 ? 0.0 : ni * 2 * sizeof(index_t));
+    const std::string layout = slice > 0 ? "_sliced" : "_csr";
+    out.push_back({"block_assemble" + layout, asm_bytes, "gather",
+                   time_it(o, [&] { bk::gpu_loops::assemble(dd, dl.schedule); })});
+    out.push_back({"block_multiply" + layout, mul_bytes, "gather",
+                   time_it(o, [&] { bk::gpu_loops::multiply(dd, dl.schedule); })});
+    // The same assembly without the off-diagonal blocks (codegen/tests/kernels): their cost.
+    namespace dgo = autan::kernels::diagonal_only;
+    DeviceArray<A> ddiag3(25 * nc);
+    dgo::Data<P> dq{};
+    dl.bind(dq);
+    dq.face_jac = djac.get();
+    dq.bnd_jac = dbnd.get();
+    dq.shift = dshift.get();
+    dq.diag = ddiag3.get();
+    dgo::gpu_loops::assemble(dq, dl.schedule);
+    if (max_rel_diff(as_double(ddiag3.download()), as_double(hdiag2)) > tolerance) verified = false;
+    out.push_back({"block_diagonal" + layout, asm_bytes - inc * 25.0 * sizeof(J), "gather",
+                   time_it(o, [&] { dgo::gpu_loops::assemble(dq, dl.schedule); })});
+  }
   std::fprintf(stderr, "colouring %.3f s (%zu interior colours, %zu boundary colours)\n",
                colouring_seconds, dm.schedule.interior.offsets.size() - 1,
                dm.schedule.boundary.offsets.size() - 1);

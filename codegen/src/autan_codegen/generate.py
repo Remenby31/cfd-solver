@@ -54,12 +54,6 @@ def generate(
         files[f"{m.name}_gpu.cuh"] = emit_gpu_header(m)
         files[f"{m.name}_gpu.cu"] = emit_gpu_instances(m, policies)
     if "metal" in backends:
-        accum = [lm.name for lm in m.loops if lm.fn.compute == "accum"]
-        if accum:
-            raise CodegenError(
-                Code.POLICY_UNSUPPORTED_BY_BACKEND,
-                f"Metal has no FP64 arithmetic for loops computing in the accumulation type: {accum}",
-            )
         files[f"{m.name}_metal.hpp"] = emit_metal_header(
             m, [p for p in policies if p in METAL_POLICIES], line_directives
         )

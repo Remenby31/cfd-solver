@@ -99,23 +99,32 @@ def test_deterministic_strategies_are_bitwise_reproducible(
 ) -> None:
     # Residual, gradients, the residual norm computed on the device, and the adjoint of the
     # composed residual (whose LSQ-gradient reduction adjoint scatters to neighbours): bitwise
-    # equal over 10 runs and two launch shapes (research section 8, determinism).
+    # equal over 10 runs, two launch shapes and, on CUDA and HIP, both incidence layouts (CSR
+    # and sliced, which visits each cell's faces in the same order) (research section 8).
     m, d = case
     call = lambda: s.gpu_advection(m, policy, strategy, 128, d["q"], d["grad"], mms.VELOCITY)
     if is_refused(backend, policy, strategy, call):
         return
     ybar = np.random.default_rng(6).standard_normal(m.n_cells)
     runs = []
-    for k in range(10):
-        block = 64 if k % 2 else 256
-        res, grad, norm = s.gpu_advdiff_residual(
-            m, policy, strategy, block, d["q"], d["q_b"], d["src"], mms.VELOCITY, mms.NU
-        )
-        gg, _, _ = s.gpu_gradients(m, policy, "gg", strategy, block, d["q"], d["q_b"], 2, d["grad"])
-        qbar = s.gpu_advdiff_adjoint(
-            m, policy, strategy, block, d["q"], d["q_b"], d["src"], mms.VELOCITY, mms.NU, ybar
-        )
-        runs.append((res.tobytes(), grad.tobytes(), gg.tobytes(), norm, qbar.tobytes()))
+    try:
+        for k in range(10):
+            block = 64 if k % 2 else 256
+            if backend != "metal":  # DeviceMesh (and its sliced layouts) is CUDA/HIP
+                s.set_incidence_slice(32 if k % 3 == 2 else 0)
+            res, grad, norm = s.gpu_advdiff_residual(
+                m, policy, strategy, block, d["q"], d["q_b"], d["src"], mms.VELOCITY, mms.NU
+            )
+            gg, _, _ = s.gpu_gradients(
+                m, policy, "gg", strategy, block, d["q"], d["q_b"], 2, d["grad"]
+            )
+            qbar = s.gpu_advdiff_adjoint(
+                m, policy, strategy, block, d["q"], d["q_b"], d["src"], mms.VELOCITY, mms.NU, ybar
+            )
+            runs.append((res.tobytes(), grad.tobytes(), gg.tobytes(), norm, qbar.tobytes()))
+    finally:
+        if backend != "metal":
+            s.set_incidence_slice(0)
     assert len(set(runs)) == 1
 
 

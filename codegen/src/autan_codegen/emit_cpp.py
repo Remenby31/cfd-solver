@@ -151,6 +151,24 @@ def at(d: dsl.Dataset | dsl.Parameter, index: str, c: int, layout: str = "soa") 
     return f"d.{d.name}[offset_t({c}) * {stride(d)} + ({index})]" if c else f"d.{d.name}[{index}]"
 
 
+def incidence_loop(indent: str) -> str:
+    """Opening of the loop over the incidences k of cell c, in CSR or sliced layout
+    (Topology::incidence_stride): the same incidences in the same order."""
+    return (
+        f"{indent}for (offset_t k = d.topo.cell_face_offsets[c], kn = d.topo.incidence_stride == 1 "
+        "? d.topo.cell_face_offsets[c + 1] : d.topo.cell_face_offsets[c] + "
+        "offset_t(d.topo.incidence_length[c]) * d.topo.incidence_stride; "
+        "k < kn; k += d.topo.incidence_stride) {"
+    )
+
+
+def at_dynamic(d: dsl.Dataset, index: str, comp: str, layout: str = "soa") -> str:
+    """`at` with a component index computed at run time."""
+    if layout == "aos":
+        return f"d.{d.name}[offset_t({d.type.size}) * ({index}) + {comp}]"
+    return f"d.{d.name}[offset_t{comp} * {stride(d)} + ({index})]"
+
+
 def rel_datasets(m: Module) -> set[int]:
     """Ids of the datasets some body reads through rel(), in any loop of the module."""
     out: set[int] = set()
@@ -226,6 +244,21 @@ def call_args(
     for name, t in zip(sig.names[skip:], sig.types[skip:], strict=True):
         b = bindings[name]
         for c in range(t.size):
+            if b.via in ("near", "far", "on_boundary"):
+                zero = f"{ctype(t.role)}(0)"
+                if b.via == "on_boundary":
+                    out.append(f"(across ? {zero} : {at(b.dataset, 'f', c, layout)})")
+                    continue
+                # Half 0 of the face's (2, ...) data for its left cell, half 1 for its right one,
+                # in the face's global orientation (Topology::face_reversed).
+                left = (
+                    "(d.topo.owner[f] == c) != "
+                    "(d.topo.face_reversed != nullptr && d.topo.face_reversed[f] != 0)"
+                )
+                first = left if b.via == "near" else f"!({left})"
+                comp = f"(({first}) ? {c} : {t.size + c})"
+                out.append(f"(across ? {at_dynamic(b.dataset, 'f', comp, layout)} : {zero})")
+                continue
             if b.via == "other":
                 bnd = (
                     at(b.boundary, "f", c, layout)

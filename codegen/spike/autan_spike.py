@@ -126,10 +126,17 @@ def global_ids(m: Mesh) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
     return cells, faces
 
 
-def _wrap(h: ctypes.c_void_p) -> Mesh:
+def incidences(m: Mesh) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int32], F64]:
+    """Cell -> face offsets, faces and incidence sides as `m` holds them now (after
+    set_global_order: in the global order, sides for the faces' global orientation)."""
+    a = _arrays(m.handle)
+    return a["cell_face_offsets"], a["cell_faces"], a["incidence_side"]
+
+
+def _arrays(h: ctypes.c_void_p) -> dict[str, np.ndarray]:
     counts = np.zeros(5, dtype=np.int64)
     lib().autan_spike_mesh_counts(h, _p(counts))
-    nc, no, nf, ni, nk = (int(c) for c in counts)
+    nc, _, nf, ni, nk = (int(c) for c in counts)
     a = {
         "owner": np.zeros(nf, np.int32),
         "neighbour": np.zeros(ni, np.int32),
@@ -144,6 +151,14 @@ def _wrap(h: ctypes.c_void_p) -> Mesh:
         "incidence_side": np.zeros(nk),
     }
     lib().autan_spike_mesh_arrays(h, *(_p(v) for v in a.values()))
+    return a
+
+
+def _wrap(h: ctypes.c_void_p) -> Mesh:
+    counts = np.zeros(5, dtype=np.int64)
+    lib().autan_spike_mesh_counts(h, _p(counts))
+    nc, no, nf, ni, nk = (int(c) for c in counts)
+    a = _arrays(h)
     soa = {k: a[k].reshape(3, n).T.copy() for k, n in
            (("face_area", nf), ("face_centroid", nf), ("cell_centroid", nc), ("lsq_weight", nk))}  # fmt: skip
     moment = a["face_moment"].reshape(9, nf).T.reshape(nf, 3, 3).copy()
@@ -486,6 +501,11 @@ def gpu_lsq_bounds_adjoint(
 def set_stencil_slice(slice_: int) -> None:
     """Cells per slice of the device stencil layout of the following calls (0: CSR)."""
     lib().autan_spike_set_stencil_slice(ctypes.c_int(slice_))
+
+
+def set_incidence_slice(slice_: int) -> None:
+    """Cells per slice of the device incidence layout of the following calls (0: CSR)."""
+    lib().autan_spike_set_incidence_slice(ctypes.c_int(slice_))
 
 
 def gpu_bind_check(m: Mesh) -> tuple[bool, bool]:

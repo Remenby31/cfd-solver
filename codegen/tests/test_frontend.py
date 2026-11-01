@@ -17,6 +17,7 @@ from autan_codegen.dsl import (
     State,
     cells,
     dot,
+    identity,
     inverse,
     outer,
     pointwise,
@@ -25,6 +26,7 @@ from autan_codegen.dsl import (
 )
 from autan_codegen.errors import CodegenError
 from autan_codegen.frontend import parse
+from autan_codegen.generate import generate
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -165,6 +167,11 @@ def calls_accum_helper(x: State) -> State:
 
 
 @pointwise
+def identity_of_a_value(x: State) -> Grad.Mat3:
+    return identity(x)
+
+
+@pointwise
 def inverse_of_a_rectangle(m: Grad.Mat53) -> Grad.Mat53:
     return inverse(m)
 
@@ -193,6 +200,7 @@ def test_the_branch_not_taken_does_not_poison_the_adjoint() -> None:
         (rel_after_arithmetic, "E1007"),
         (calls_python, "E1001"),
         (inverse_of_a_rectangle, "E1006"),
+        (identity_of_a_value, "E1006"),
         (calls_accum_helper, "E1006"),
     ],
 )
@@ -220,6 +228,11 @@ def in_place(x: Residual) -> Residual:
     return 2.0 * x
 
 
+@pointwise
+def block_value(b: dsl.Jac) -> Residual:
+    return b
+
+
 @pointwise(compute="accum")
 def scaled_in_accum(x: Geom) -> Residual:
     return 2.0 * x
@@ -245,6 +258,15 @@ def test_loop_declarations_are_checked() -> None:
     for x in (q, cells.field("volume", Geom)):
         with pytest.raises(CodegenError) as info:
             build_loop("bad", dsl.cell_loop(scaled_in_accum, x=x, out=dsl.Write(r)))
+        assert info.value.code == "E1003"
+    # near and far take a half of a (2, ...) face dataset, in incidence reductions only.
+    single, pair = dsl.faces.field("single", dsl.Jac), dsl.faces.field("pair", dsl.Jac.shape(2))
+    for loop in (
+        lambda: dsl.cell_reduce(block_value, b=single.near, acc=dsl.Sum(r)),
+        lambda: dsl.face_loop(block_value, b=pair.far, out=dsl.Inc(r, left=1, right=-1)),
+    ):
+        with pytest.raises(CodegenError) as info:
+            build_loop("bad", loop())
         assert info.value.code == "E1003"
 
 
@@ -404,3 +426,36 @@ def test_inverse_pivots_on_magnitudes_whatever_the_module_calls_abs(tmp_path: Pa
     with np.errstate(invalid="ignore"):  # the NaN constant of the singular branch
         got = run(fn, tuple(a.ravel()))
     np.testing.assert_allclose(got, np.linalg.inv(a).ravel())
+
+
+ENTRIES_OF_ACTIVE_DATA = """
+from autan_codegen.dsl import Jac, Residual, State, Sum, Write, cell_reduce, cells, incidences
+from autan_codegen.dsl import pointwise
+
+q = cells.field("q", State)
+r = cells.field("r", Residual)
+e = incidences.field("e", Jac)
+
+
+@pointwise
+def term(qo: State) -> tuple[Residual, Jac]:
+    return qo, 2.0 * qo
+
+
+bad = cell_reduce(term, qo=q.other(None), acc=Sum(r), entries=Write(e))
+"""
+
+
+def test_per_entry_outputs_go_to_the_entries_and_take_no_active_input(tmp_path: Path) -> None:
+    # One value per entry, written once by its cell: a dataset of the iterated set, and no
+    # derivatives to transpose (the adjoint of a per-entry write is not generated).
+    with pytest.raises(CodegenError) as info:
+        dsl.cell_reduce(
+            block_value, b=dsl.faces.field("f", dsl.Jac), acc=dsl.Sum(r), entries=dsl.Write(r)
+        )
+    assert info.value.code == "E1004"
+    src = tmp_path / "entries.py"
+    src.write_text(ENTRIES_OF_ACTIVE_DATA)
+    with pytest.raises(CodegenError) as info:
+        generate(src, tmp_path / "gen", ["cpu"])
+    assert info.value.code == "E1012"

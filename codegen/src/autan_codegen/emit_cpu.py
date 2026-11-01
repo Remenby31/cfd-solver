@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from autan_codegen import dsl
 from autan_codegen.derive import ReduceAdjoint, adj_ds
-from autan_codegen.emit_cpp import Emitter, at, call_args, ctype
+from autan_codegen.emit_cpp import Emitter, at, call_args, ctype, incidence_loop
 
 if TYPE_CHECKING:
     from autan_codegen.model import LoopModel, Module
@@ -42,7 +42,7 @@ def inc_lines(
 
 
 def n_out(lm: LoopModel) -> int:
-    return sum(o.dataset.type.size for o in lm.loop.outputs)
+    return sum(o.dataset.type.size for o in [*lm.loop.outputs, *lm.loop.entries])
 
 
 def acc_ref(o: dsl.Accumulator, k: int) -> str:
@@ -115,10 +115,11 @@ def entry_loop(over: str, indent: str) -> list[str]:
             f"{i2}[[maybe_unused]] const index_t f = across ? -1 : -e - 1;",
         ]
     return [
-        f"{indent}for (offset_t k = d.topo.cell_face_offsets[c]; k < d.topo.cell_face_offsets[c + 1]; ++k) {{",
+        incidence_loop(indent),
         f"{i2}const index_t f = d.topo.cell_faces[k];",
-        f"{i2}[[maybe_unused]] const bool across = f < d.topo.n_interior_faces;",
-        f"{i2}[[maybe_unused]] const index_t nb = across ? (d.topo.owner[f] == c ? d.topo.neighbour[f] : d.topo.owner[f]) : -1;",
+        # The column index of the sliced layout, else the face's other cell.
+        f"{i2}[[maybe_unused]] const index_t nb = d.topo.incidence_cell != nullptr ? d.topo.incidence_cell[k] : f < d.topo.n_interior_faces ? (d.topo.owner[f] == c ? d.topo.neighbour[f] : d.topo.owner[f]) : -1;",
+        f"{i2}[[maybe_unused]] const bool across = nb >= 0;",
     ]
 
 
@@ -131,17 +132,24 @@ def reduce_body(lm: LoopModel, indent: str, layout: str = "soa") -> list[str]:
     lines = acc_decls(accs, offs, n, indent)  # type: ignore[arg-type]
     lines.extend(entry_loop(loop.over, indent))
     i2 = indent + "  "
-    lines.append(f"{i2}typename P::compute out[{n}];")
+    lines.append(f"{i2}typename P::{lm.fn.compute} out[{n}];")
     args = call_args(
         lm.sig, loop.bindings, {"self": "c", "direct": "k", "face": "f"}, layout=layout
     )
     lines.append(f"{i2}{lm.fn.name}<P>({', '.join([*args, 'out'])});")
     lines.extend(_updates(accs, offs, "out", i2))  # type: ignore[arg-type]
+    k = sum(o.dataset.type.size for o in accs)
+    for w in loop.entries:
+        for c in range(w.dataset.type.size):
+            lines.append(
+                f"{i2}{at(w.dataset, 'k', c, layout)} = static_cast<{ctype(w.dataset.type.role)}>(out[{k}]);"
+            )
+            k += 1
     lines.append(f"{indent}}}")
     written = [(o, off) for o, off in zip(accs, offs, strict=True) if o.write]  # type: ignore[union-attr]
     if lm.fin_fn is not None and lm.fin_sig is not None:
         n_fin = len(lm.fin_fn.outputs)
-        lines.append(f"{indent}typename P::compute fin[{n_fin}];")
+        lines.append(f"{indent}typename P::{lm.fin_fn.compute} fin[{n_fin}];")
         order = lm.fin_args or [("acc", k) for k in range(len(accs))] + [
             ("bind", nm) for nm in lm.fin_sig.names[len(accs) :]
         ]
@@ -480,9 +488,7 @@ def emit_gather(e: Emitter, lm: LoopModel) -> None:
     e.w("  }")
     e.w("  for (index_t c = 0; c < d.topo.n_cells; ++c) {")
     e.w(f"    A acc[{n}] = {{}};")
-    e.w(
-        "    for (offset_t k = d.topo.cell_face_offsets[c]; k < d.topo.cell_face_offsets[c + 1]; ++k) {"
-    )
+    e.w(incidence_loop("    "))
     e.w("      const index_t f = d.topo.cell_faces[k];")
     skip = (
         "f >= d.topo.n_owned_interior_faces"

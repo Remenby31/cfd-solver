@@ -16,6 +16,7 @@ from autan_codegen.__main__ import main
 from autan_codegen.derive import derive
 from autan_codegen.emit_metal import POLICIES as METAL_POLICIES
 from autan_codegen.emit_metal import emit_msl
+from autan_codegen.errors import Code, CodegenError
 from conftest import ROOT
 from test_generate import MODULE
 
@@ -82,6 +83,13 @@ def test_every_kernel_module_compiles_to_metal(backend: str, tmp_path: Path, sou
         path = ROOT / "kernels" / source
     m = model.load(path)
     derive(m)
+    if source == "blocks.py":
+        # Its inverse and finalises compute in the accumulation type, which Metal cannot
+        # divide in: refused (E1013), not compiled.
+        with pytest.raises(CodegenError) as info:
+            emit_msl(m, list(METAL_POLICIES))
+        assert info.value.code == Code.POLICY_UNSUPPORTED_BY_BACKEND
+        return
     text = emit_msl(m, list(METAL_POLICIES))
     err = ctypes.create_string_buffer(4096)
     rc = s.lib().autan_spike_metal_compile(path.stem.encode(), text.encode(), err, len(err))

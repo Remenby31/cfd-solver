@@ -56,7 +56,11 @@ class LoopModel:
         return out
 
     def writes(self) -> list[dsl.Dataset]:
-        return [o.dataset for o in self.loop.outputs] + [j.dataset for j in self.loop.jacobians]
+        return (
+            [o.dataset for o in self.loop.outputs]
+            + [j.dataset for j in self.loop.jacobians]
+            + [w.dataset for w in self.loop.entries]
+        )
 
 
 @dataclass
@@ -91,7 +95,8 @@ ALLOWED_VIA = {
     "reduce": {
         dsl.MeshSet.CELLS: {"self", "other"},
         dsl.MeshSet.INCIDENCES: {"direct"},
-        dsl.MeshSet.FACES: {"direct"},  # the face of the incidence
+        # The face of the incidence; near, far and on_boundary load only where they are valid.
+        dsl.MeshSet.FACES: {"direct", "near", "far", "on_boundary"},
     },
 }
 
@@ -111,7 +116,15 @@ def _check_bindings(
     for name, t in zip(sig.names[skip:], sig.types[skip:], strict=True):
         b = bindings[name]
         ds = b.dataset
-        if ds.type.shape != t.shape or ds.type.role is not t.role:
+        halves = b.via in ("near", "far")
+        shape = ds.type.shape[1:] if halves and ds.type.shape[:1] == (2,) else ds.type.shape
+        if halves and ds.type.shape[:1] != (2,):
+            raise CodegenError(
+                Code.INVALID_BINDING,
+                f"{name}: near and far read a dataset of shape (2, ...)",
+                where,
+            )
+        if shape != t.shape or ds.type.role is not t.role:
             raise CodegenError(
                 Code.INVALID_BINDING,
                 f"argument {name} is {t.role.value}{t.shape}, data {ds.name} is {ds.type.role.value}{ds.type.shape}",
@@ -132,10 +145,10 @@ def _check_bindings(
             )
         if b.via == "other":
             bd = b.boundary
-            if bd is None or bd.set is not dsl.MeshSet.FACES or bd.type != ds.type:
+            if bd is not None and (bd.set is not dsl.MeshSet.FACES or bd.type != ds.type):
                 raise CodegenError(
                     Code.INVALID_BINDING,
-                    f"{name}: other() needs a face dataset of the same type",
+                    f"{name}: other() takes None or a face dataset of the same type",
                     where,
                 )
 
@@ -143,15 +156,29 @@ def _check_bindings(
 def _check_outputs(where: str, lm: LoopModel) -> None:
     loop = lm.loop
     sig = lm.fin_sig if lm.fin_sig is not None else lm.sig
-    rets = sig.returns
-    if rets is None:
+    rets, body_rets = sig.returns, lm.sig.returns
+    if rets is None or body_rets is None:
         raise CodegenError(Code.INVALID_BINDING, "loop bodies annotate their return types", where)
-    if len(rets) != len(loop.outputs):
+    # Entries take the body's last outputs; the accumulators (or the finalise) the others.
+    n_entries = len(loop.entries)
+    entry_rets = body_rets[len(body_rets) - n_entries :] if n_entries else []
+    if lm.fin_sig is None:
+        rets = rets[: len(rets) - n_entries]
+    if len(rets) != len(loop.outputs) or len(body_rets) != len(loop.outputs) + n_entries:
         raise CodegenError(
             Code.INVALID_BINDING,
-            f"body returns {len(rets)} values, loop has {len(loop.outputs)} outputs",
+            f"body returns {len(body_rets)} values, loop has {len(loop.outputs)} outputs "
+            f"and {n_entries} entries",
             where,
         )
+    for t, w in zip(entry_rets, loop.entries, strict=True):
+        ds = w.dataset
+        if ds.type.shape != t.shape or ds.type.role not in dsl.PASSIVE_ROLES or ds.geometry:
+            raise CodegenError(
+                Code.INVALID_BINDING,
+                f"entry output {ds.name} must be a Jac or JacAccum dataset of shape {t.shape}",
+                where,
+            )
     for t, o in zip(rets, loop.outputs, strict=True):
         ds = o.dataset
         wanted = dsl.MeshSet.FACES if loop.kind == "boundary_write" else dsl.MeshSet.CELLS
@@ -173,7 +200,7 @@ def _check_outputs(where: str, lm: LoopModel) -> None:
                 where,
             )
     if lm.fin_sig is not None:
-        rets_body = lm.sig.returns or []
+        rets_body = (lm.sig.returns or [])[: len(loop.outputs)]
         for k, t in enumerate(rets_body):
             ft = lm.fin_sig.types[k]
             if ft.shape != t.shape or ft.role is not dsl.Role.RESIDUAL:
@@ -240,19 +267,23 @@ def build_loop(name: str, loop: dsl.Loop) -> LoopModel:
         fin_fn, fin_sig = parse(loop.finalise)
         n_acc = len(loop.outputs)
         _check_bindings(where, "cell", fin_sig, loop.finalise_bindings, skip=n_acc)
-    if fn.compute == "accum" or (fin_fn is not None and fin_fn.compute == "accum"):
+    accum = [(fn, loop.bindings)] if fn.compute == "accum" else []
+    if fin_fn is not None and fin_fn.compute == "accum":
+        accum.append((fin_fn, loop.finalise_bindings))
+    for _, bound in accum:
         # Block datasets and parameters only: no derivatives, no geometry stored in geom_value.
         others = [
             n
-            for n, b in loop.bindings.items()
+            for n, b in bound.items()
             if not (
                 isinstance(b.dataset, dsl.Parameter) or b.dataset.type.role in dsl.PASSIVE_ROLES
             )
         ]
-        if loop.kind != "cell" or others:
+        if loop.kind not in ("cell", "reduce") or others:
             raise CodegenError(
                 Code.INVALID_BINDING,
-                f"compute='accum' bodies run in cell loops on blocks and parameters, not {others}",
+                "compute='accum' bodies run in cell loops and reductions on blocks and "
+                f"parameters, not {others}",
                 where,
             )
     lm = LoopModel(name, loop, fn, sig, fin_fn, fin_sig)

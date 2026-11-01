@@ -301,6 +301,9 @@ int autan_spike_gpu_sum_of_squares(const double* x, std::int64_t n, double* out,
 /// Cells per slice of the stencil layout of the following device calls (0: CSR).
 void autan_spike_set_stencil_slice(int slice) { autan::spike::stencil_slice() = slice; }
 
+/// Cells per slice of the incidence layout of the following device calls (0: CSR).
+void autan_spike_set_incidence_slice(int slice) { autan::spike::incidence_slice() = slice; }
+
 /// Binds a Data-like struct holding built-in face_area (read-only) and a physics' own writable
 /// cell_volume: out[0] = 1 if face_area was bound, out[1] = 1 if cell_volume was left alone.
 int autan_spike_gpu_bind_check(const void* mesh, int* out, char* err, std::size_t err_len) {

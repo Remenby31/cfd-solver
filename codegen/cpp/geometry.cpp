@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <span>
 #include <stdexcept>
 
 namespace autan::kernels {
@@ -231,7 +232,9 @@ PackedGeometry pack_geometry(const Mesh& mesh, const Geometry& g, const GlobalKe
   for (std::size_t c = 0; c + 1 < offsets.size(); ++c) {
     for (auto k = offsets[c]; k < offsets[c + 1]; ++k) {
       const auto f = static_cast<std::size_t>(cell_faces[static_cast<std::size_t>(k)]);
-      if (f < neighbour.size() && static_cast<std::size_t>(owner[f]) != c) {
+      // +1 for the face's left cell in its global orientation (keys->reversed).
+      const bool reversed = keys != nullptr && !keys->reversed.empty() && keys->reversed[f] != 0;
+      if (f < neighbour.size() && (static_cast<std::size_t>(owner[f]) != c) != reversed) {
         p.incidence_side[static_cast<std::size_t>(k)] = -1.0;
       }
     }
@@ -257,37 +260,103 @@ PackedGeometry pack_geometry(const Mesh& mesh, const Geometry& g, const GlobalKe
   return p;
 }
 
-SlicedStencil sliced(const CellStencil& csr, int slice) {
+namespace {
+
+// Rows of a CSR (n + 1 offsets) in slices of `slice` rows: starts (n + 1, the last the total
+// size), lengths, and the sliced position of each CSR entry.
+struct Slices {
+  std::vector<offset_t> starts;
+  std::vector<index_t> length;
+  std::vector<offset_t> position;
+};
+
+Slices slice_rows(std::span<const offset_t> offsets, int slice) {
   if (slice < 1) {
-    throw std::invalid_argument("E1101: stencil slice must be at least 1");
+    throw std::invalid_argument("E1101: slice must be at least 1");
   }
-  const std::size_t nc = csr.offsets.size() - 1;
+  const std::size_t nc = offsets.size() - 1;
   const auto w = static_cast<std::size_t>(slice);
-  SlicedStencil out;
-  out.stride = slice;
+  Slices out;
   out.length.resize(nc);
-  out.position.resize(csr.entries.size());
-  out.stencil.offsets.resize(nc + 1);
+  out.position.resize(static_cast<std::size_t>(offsets[nc]));
+  out.starts.resize(nc + 1);
   offset_t start = 0;
   for (std::size_t s = 0; s * w < nc; ++s) {
     offset_t longest = 0;
     for (std::size_t l = 0; l < w && s * w + l < nc; ++l) {
       const std::size_t c = s * w + l;
-      longest = std::max(longest, csr.offsets[c + 1] - csr.offsets[c]);
+      longest = std::max(longest, offsets[c + 1] - offsets[c]);
     }
     for (std::size_t l = 0; l < w && s * w + l < nc; ++l) {
       const std::size_t c = s * w + l;
-      out.stencil.offsets[c] = start + static_cast<offset_t>(l);
-      out.length[c] = static_cast<index_t>(csr.offsets[c + 1] - csr.offsets[c]);
+      out.starts[c] = start + static_cast<offset_t>(l);
+      out.length[c] = static_cast<index_t>(offsets[c + 1] - offsets[c]);
       for (offset_t j = 0; j < out.length[c]; ++j) {
-        out.position[static_cast<std::size_t>(csr.offsets[c] + j)] =
-            out.stencil.offsets[c] + j * static_cast<offset_t>(slice);
+        out.position[static_cast<std::size_t>(offsets[c] + j)] =
+            out.starts[c] + j * static_cast<offset_t>(slice);
       }
     }
     start += longest * static_cast<offset_t>(slice);
   }
-  out.stencil.offsets[nc] = start;
-  const auto n = static_cast<std::size_t>(start);
+  out.starts[nc] = start;
+  return out;
+}
+
+}  // namespace
+
+SlicedIncidences sliced_incidences(const Topology& csr, int slice) {
+  const auto nc = static_cast<std::size_t>(csr.n_cells);
+  auto rows = slice_rows(std::span(csr.cell_face_offsets, nc + 1), slice);
+  SlicedIncidences out;
+  out.stride = slice;
+  const auto n = static_cast<std::size_t>(rows.starts[nc]);
+  out.cell_faces.assign(n, 0);
+  out.cell.assign(n, -1);
+  out.twin.assign(n, -1);
+  for (std::size_t c = 0; c < nc; ++c) {
+    for (auto k = csr.cell_face_offsets[c]; k < csr.cell_face_offsets[c + 1]; ++k) {
+      const auto p = static_cast<std::size_t>(rows.position[static_cast<std::size_t>(k)]);
+      const index_t f = csr.cell_faces[k];
+      out.cell_faces[p] = f;
+      if (f < csr.n_interior_faces) {
+        out.cell[p] = csr.owner[f] == static_cast<index_t>(c) ? csr.neighbour[f] : csr.owner[f];
+      }
+      const offset_t t = csr.incidence_twin == nullptr ? -1 : csr.incidence_twin[k];
+      out.twin[p] = t < 0 ? -1 : rows.position[static_cast<std::size_t>(t)];
+    }
+  }
+  out.cell_face_offsets = std::move(rows.starts);
+  out.length = std::move(rows.length);
+  out.position = std::move(rows.position);
+  return out;
+}
+
+std::vector<double> sliced_values(const SlicedIncidences& s, const std::vector<double>& csr,
+                                  int comps) {
+  const std::size_t ne = s.position.size();
+  const std::size_t n = s.cell_faces.size();
+  const auto nk = static_cast<std::size_t>(comps);
+  if (csr.size() != nk * ne) {
+    throw std::invalid_argument("E1101: per-incidence values of the wrong size");
+  }
+  std::vector<double> out(nk * n, 0.0);
+  for (std::size_t k = 0; k < ne; ++k) {
+    for (std::size_t i = 0; i < nk; ++i) {
+      out[i * n + static_cast<std::size_t>(s.position[k])] = csr[i * ne + k];
+    }
+  }
+  return out;
+}
+
+SlicedStencil sliced(const CellStencil& csr, int slice) {
+  auto rows = slice_rows(csr.offsets, slice);
+  SlicedStencil out;
+  out.stride = slice;
+  out.stencil.offsets = std::move(rows.starts);
+  out.length = std::move(rows.length);
+  out.position = std::move(rows.position);
+  const std::size_t nc = csr.offsets.size() - 1;
+  const auto n = static_cast<std::size_t>(out.stencil.offsets[nc]);
   const std::size_t ne = csr.entries.size();
   out.stencil.entries.assign(n, 0);
   out.stencil.twin.assign(n, -1);
