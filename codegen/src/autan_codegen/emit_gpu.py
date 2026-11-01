@@ -302,6 +302,9 @@ def emit_face_launcher(e: Emitter, lm: LoopModel) -> None:
 
 def emit_cell_kernel(e: Emitter, lm: LoopModel) -> None:
     tid = "static_cast<index_t>(blockIdx.x * blockDim.x + threadIdx.x)"
+    if lm.loop.listed:
+        _emit_listed_kernel(e, lm, tid)
+        return
     _kernel_head(e, f"{lm.name}_kernel")
     if lm.kind == "boundary_write":
         e.w(f"  const index_t f = d.topo.n_interior_faces + {tid};")
@@ -353,6 +356,35 @@ def emit_cell_kernel(e: Emitter, lm: LoopModel) -> None:
         "    const auto grid = static_cast<unsigned>((d.topo.n_owned_cells + s.block - 1) / s.block);"
     )
     e.w(f"    {lm.name}_kernel<P><<<grid, static_cast<unsigned>(s.block), 0, s.stream>>>(d);")
+    e.w("  }")
+    e.w(f'  gpu::check(gpu::last_error(), "{lm.name}");')
+    e.w("}")
+    e.w()
+
+
+def _emit_listed_kernel(e: Emitter, lm: LoopModel, tid: str) -> None:
+    """A reduction over the cells listed at launch (one thread each)."""
+    _kernel_head(e, f"{lm.name}_kernel", ", const index_t* __restrict__ rows, const index_t n_rows")
+    e.w(f"  const index_t i = {tid};")
+    e.w("  if (i >= n_rows) {")
+    e.w("    return;")
+    e.w("  }")
+    e.w("  const index_t c = rows[i];")
+    for s in reduce_body(lm, "  "):
+        e.w(s)
+    e.w("}")
+    e.w()
+    e.w("template <class P>")
+    e.w(
+        f"void {lm.name}(const Data<P>& d, const index_t* rows, const index_t n_rows, "
+        "const gpu::Schedule& s) {"
+    )
+    e.w("  if (n_rows > 0) {")
+    e.w("    const auto grid = static_cast<unsigned>((n_rows + s.block - 1) / s.block);")
+    e.w(
+        f"    {lm.name}_kernel<P><<<grid, static_cast<unsigned>(s.block), 0, s.stream>>>"
+        "(d, rows, n_rows);"
+    )
     e.w("  }")
     e.w(f'  gpu::check(gpu::last_error(), "{lm.name}");')
     e.w("}")
@@ -463,6 +495,10 @@ def emit_gpu_instances(m: Module, policies: list[str]) -> str:
             if lm.kind in ("face", "boundary", "reduce_adjoint"):
                 e.w(
                     f"template void {lm.name}<{pol}>(const Data<{pol}>&, gpu::Strategy, const gpu::Schedule&);"
+                )
+            elif lm.loop.listed:
+                e.w(
+                    f"template void {lm.name}<{pol}>(const Data<{pol}>&, const index_t*, index_t, const gpu::Schedule&);"
                 )
             else:
                 e.w(f"template void {lm.name}<{pol}>(const Data<{pol}>&, const gpu::Schedule&);")

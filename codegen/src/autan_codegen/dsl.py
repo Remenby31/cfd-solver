@@ -318,6 +318,8 @@ class Loop:
     jacobians: list[Jacobian] = field(default_factory=list)
     frozen: bool = False  # boundary_write reading active data: derivatives through it dropped
     entries: list[Write] = field(default_factory=list)  # reductions: one value per entry
+    derivatives: bool = True  # False: no tangent or adjoint (linear-algebra loops)
+    listed: bool = False  # reductions over the cells listed at launch, in place
 
 
 def _bindings(raw: dict[str, object]) -> dict[str, Binding]:
@@ -401,6 +403,8 @@ def cell_reduce(
     finalise_args: dict[str, object] | None = None,
     over: str = INCIDENCES,
     entries: object = (),
+    derivatives: bool = True,
+    listed: bool = False,
     **args: object,
 ) -> Loop:
     """Reduce `body` over the entries of each owned cell into accumulators, then write them.
@@ -416,6 +420,11 @@ def cell_reduce(
     `entries` (Write outputs to datasets of the iterated set, of a passive role) take the body's
     outputs after the accumulators' ones, one value per entry, stored at the entry: each entry
     is written once, by its cell. A loop with entries has no active input (no derivatives).
+    `derivatives=False` generates no tangent or adjoint (linear-algebra loops); its bodies may
+    then compute in the accumulation type on Residual data too. `listed=True` runs over the
+    cells listed at launch (`name(d, rows, n_rows)`), and may write what it reads across faces:
+    the caller lists cells no two of which are neighbours (one colour of a colouring); it has
+    no derivatives.
     """
     if over not in (INCIDENCES, STENCIL):
         raise CodegenError(
@@ -427,6 +436,11 @@ def cell_reduce(
             raise CodegenError(
                 Code.INVALID_LOOP_OUTPUT, "cell_reduce accumulators are Sum, Min or Max"
             )
+    if listed and (over != INCIDENCES or derivatives):
+        raise CodegenError(
+            Code.INVALID_LOOP_OUTPUT,
+            "listed reductions run over incidences and have no derivatives (derivatives=False)",
+        )
     per_entry = _outs(entries) if entries != () else []
     for w in per_entry:
         if not isinstance(w, Write) or w.dataset.set.value != over:
@@ -443,6 +457,8 @@ def cell_reduce(
         _bindings(dict(finalise_args or {})),
         over=over,
         entries=per_entry,
+        derivatives=derivatives,
+        listed=listed,
     )
 
 

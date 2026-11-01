@@ -270,14 +270,14 @@ def build_loop(name: str, loop: dsl.Loop) -> LoopModel:
     accum = [(fn, loop.bindings)] if fn.compute == "accum" else []
     if fin_fn is not None and fin_fn.compute == "accum":
         accum.append((fin_fn, loop.finalise_bindings))
+    # Block datasets and parameters (no geometry stored in geom_value), and Residual data, stored
+    # in the accumulation type, in a loop without derivatives.
+    roles = dsl.PASSIVE_ROLES | ({dsl.Role.RESIDUAL} if not loop.derivatives else set())
     for _, bound in accum:
-        # Block datasets and parameters only: no derivatives, no geometry stored in geom_value.
         others = [
             n
             for n, b in bound.items()
-            if not (
-                isinstance(b.dataset, dsl.Parameter) or b.dataset.type.role in dsl.PASSIVE_ROLES
-            )
+            if not (isinstance(b.dataset, dsl.Parameter) or b.dataset.type.role in roles)
         ]
         if loop.kind not in ("cell", "reduce") or others:
             raise CodegenError(
@@ -312,7 +312,8 @@ def build_loop(name: str, loop: dsl.Loop) -> LoopModel:
             )
     read = {id(d) for d in lm.reads()}
     for d in lm.writes():
-        if id(d) in read:
+        # A listed loop's caller lists cells that are not neighbours: in place is race-free.
+        if id(d) in read and not loop.listed:
             # In place updates would race between strategies and lose the adjoint of the input.
             raise CodegenError(Code.INVALID_BINDING, f"{d.name} is both read and written", where)
     return lm

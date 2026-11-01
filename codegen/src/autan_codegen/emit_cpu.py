@@ -398,7 +398,8 @@ def jacobian_lines(lm: LoopModel, args: list[str], index: str, indent: str) -> l
 def emit_loop(e: Emitter, lm: LoopModel) -> None:
     loop = lm.loop
     e.w("template <class P>")
-    e.w(f"void {lm.name}(const Data<P>& d) {{")
+    rows = ", const index_t* rows, const index_t n_rows" if loop.listed else ""
+    e.w(f"void {lm.name}(const Data<P>& d{rows}) {{")
     e.w("  using A [[maybe_unused]] = typename P::accum;")
     n = n_out(lm) if lm.kind != "reduce_adjoint" else 0
     if lm.kind in ("face", "boundary"):
@@ -449,6 +450,12 @@ def emit_loop(e: Emitter, lm: LoopModel) -> None:
     elif lm.kind == "reduce_adjoint":
         e.w("  for (index_t c = 0; c < d.topo.n_owned_cells; ++c) {")
         for s in reduce_adjoint_body(lm, "    ", "plain"):
+            e.w(s)
+        e.w("  }")
+    elif lm.loop.listed:
+        e.w("  for (index_t i = 0; i < n_rows; ++i) {")
+        e.w("    const index_t c = rows[i];")
+        for s in reduce_body(lm, "    "):
             e.w(s)
         e.w("  }")
     else:

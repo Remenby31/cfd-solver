@@ -38,6 +38,8 @@ diag_inv = cells.field("diag_inv", JacAccum.Mat5)
 off = incidences.field("off", Jac.Mat5)
 x = cells.field("x", Residual.Vec5)
 y = cells.field("y", Residual.Vec5)
+r = cells.field("r", Residual.Vec5)
+rhs = cells.field("rhs", Residual.Vec5)
 
 
 @pointwise
@@ -79,9 +81,25 @@ def coupling(b: Jac.Mat5, xo: Residual.Vec5) -> Residual.Vec5:
     return b @ xo
 
 
-@pointwise
+# The off-diagonal blocks' products in the compute type; the diagonal block's product and every
+# sum in the accumulation type (FP64 under fp32+acc64, as the inverse).
+
+
+@pointwise(compute="accum")
 def with_diagonal(acc: Residual.Vec5, a: JacAccum.Mat5, xc: Residual.Vec5) -> Residual.Vec5:
     return acc + a @ xc
+
+
+@pointwise(compute="accum")
+def defect(
+    acc: Residual.Vec5, a: JacAccum.Mat5, xc: Residual.Vec5, bc: Residual.Vec5
+) -> Residual.Vec5:
+    return bc - acc - a @ xc
+
+
+@pointwise(compute="accum")
+def relaxed(acc: Residual.Vec5, inv: JacAccum.Mat5, bc: Residual.Vec5) -> Residual.Vec5:
+    return inv @ (bc - acc)
 
 
 # y = A x: each cell's off-diagonal blocks in incidence order, then its diagonal block.
@@ -92,4 +110,30 @@ multiply = cell_reduce(
     acc=Sum(y),
     finalise=with_diagonal,
     finalise_args={"a": diag, "xc": x},
+    derivatives=False,
+)
+
+# r = rhs - A x, in the same order.
+residual = cell_reduce(
+    coupling,
+    b=off,
+    xo=x.other(None),
+    acc=Sum(r),
+    finalise=defect,
+    finalise_args={"a": diag, "xc": x, "bc": rhs},
+    derivatives=False,
+)
+
+# Block Gauss-Seidel on the cells listed at launch, no two of them neighbours (one colour):
+# x_c = D_c^-1 (rhs_c - the off-diagonal blocks times x across, in incidence order), in place
+# (physics BlockMatrix::relax).
+relax = cell_reduce(
+    coupling,
+    b=off,
+    xo=x.other(None),
+    acc=Sum(x),
+    finalise=relaxed,
+    finalise_args={"inv": diag_inv, "bc": rhs},
+    derivatives=False,
+    listed=True,
 )

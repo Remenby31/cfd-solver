@@ -289,8 +289,10 @@ def test_diagonal_blocks_invert_as_the_host_block_matrix(
         np.testing.assert_array_equal(_invert(lib, blocks), dev)
 
 
-# kernels/blocks.py `assemble` then `multiply` on a mesh's topology, CSR or sliced, every input
-# given as doubles and stored in the type the policy gives its dataset (component-major).
+# kernels/blocks.py on a mesh's topology, CSR or sliced: `assemble`, `invert_diagonal`, `multiply`
+# and `residual` of x, then one forward sweep of `relax` over the colours given (x after each
+# colour returned). Inputs are doubles, stored in the type the policy gives each dataset
+# (component-major).
 MATRIX_DRIVER = r"""
 #include <cstdint>
 #include <type_traits>
@@ -327,8 +329,10 @@ template <class T> void give(const std::vector<T>& v, double* out) {
 extern "C" void run(int nc, int nf, int ni, long long nk, long long stride, const index_t* owner,
                     const index_t* neighbour, const offset_t* offsets, const index_t* length,
                     const index_t* cell_faces, const index_t* cell, const double* side,
-                    const std::uint8_t* reversed, const double* face_jac, const double* bnd_jac, const double* shift,
-                    const double* x, double* diag, double* off, double* y) {
+                    const std::uint8_t* reversed, const double* face_jac, const double* bnd_jac,
+                    const double* shift, const double* x, const double* rhs, int n_colours,
+                    const index_t* colour_offsets, const index_t* colour_rows, double* diag,
+                    double* diag_inv, double* off, double* y, double* r, double* xs) {
   D d{};
   auto o = std::vector<index_t>(owner, owner + nf);
   auto n = std::vector<index_t>(neighbour, neighbour + ni);
@@ -337,14 +341,16 @@ extern "C" void run(int nc, int nf, int ni, long long nk, long long stride, cons
   auto cf = std::vector<index_t>(cell_faces, cell_faces + nk);
   auto cl = std::vector<index_t>(cell, cell + (stride == 1 ? 0 : nk));
   auto rv = std::vector<std::uint8_t>(reversed, reversed + nf);
+  auto rows = std::vector<index_t>(colour_rows, colour_rows + colour_offsets[n_colours]);
   auto sd = as<Of<decltype(*d.incidence_side)>>(side, nk);
   auto fj = as<Of<decltype(*d.face_jac)>>(face_jac, 50 * nf);
   auto bj = as<Of<decltype(*d.bnd_jac)>>(bnd_jac, 25 * nf);
   auto sh = as<Of<decltype(*d.shift)>>(shift, nc);
   auto xv = as<Of<decltype(*d.x)>>(x, 5 * nc);
-  std::vector<Of<decltype(*d.diag)>> dg(25 * nc);
+  auto bv = as<Of<decltype(*d.rhs)>>(rhs, 5 * nc);
+  std::vector<Of<decltype(*d.diag)>> dg(25 * nc), di(25 * nc);
   std::vector<Of<decltype(*d.off)>> ov(25 * nk);
-  std::vector<Of<decltype(*d.y)>> yv(5 * nc);
+  std::vector<Of<decltype(*d.y)>> yv(5 * nc), rr(5 * nc);
   Topology t{};
   t.n_cells = t.n_owned_cells = nc;
   t.n_faces = t.n_owned_faces = nf;
@@ -366,22 +372,46 @@ extern "C" void run(int nc, int nf, int ni, long long nk, long long stride, cons
   d.bnd_jac = place(bj);
   d.shift = place(sh);
   d.x = place(xv);
+  d.rhs = place(bv);
   d.diag = place(dg);
+  d.diag_inv = place(di);
   d.off = place(ov);
   d.y = place(yv);
+  d.r = place(rr);
+  index_t* device_rows = place(rows);
 #ifdef __CUDACC__
-  blocks::gpu_loops::assemble(d, gpu::Schedule{});
-  blocks::gpu_loops::multiply(d, gpu::Schedule{});
+  const gpu::Schedule s{};
+  blocks::gpu_loops::assemble(d, s);
+  blocks::gpu_loops::invert_diagonal(d, s);
+  blocks::gpu_loops::multiply(d, s);
+  blocks::gpu_loops::residual(d, s);
 #else
   blocks::cpu::assemble(d);
+  blocks::cpu::invert_diagonal(d);
   blocks::cpu::multiply(d);
+  blocks::cpu::residual(d);
 #endif
   fetch(dg, d.diag);
+  fetch(di, d.diag_inv);
   fetch(ov, d.off);
   fetch(yv, d.y);
+  fetch(rr, d.r);
   give(dg, diag);
+  give(di, diag_inv);
   give(ov, off);
   give(yv, y);
+  give(rr, r);
+  for (int k = 0; k < n_colours; ++k) {
+    const index_t* first = device_rows + colour_offsets[k];
+    const index_t count = colour_offsets[k + 1] - colour_offsets[k];
+#ifdef __CUDACC__
+    blocks::gpu_loops::relax(d, first, count, s);
+#else
+    blocks::cpu::relax(d, first, count);
+#endif
+    fetch(xv, d.x);
+    give(xv, xs + std::size_t(k) * 5 * nc);
+  }
 }
 """
 
@@ -429,17 +459,29 @@ def _sliced(m: s.Mesh, slice_: int) -> dict[str, np.ndarray | int]:
             "position": position, "total": total, "stride": slice_}  # fmt: skip
 
 
-def _matrix(
-    lib: ctypes.CDLL, m: s.Mesh, layout: dict | None, reversed_, side, face_jac, bnd_jac, shift, x
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """diag (cells, 5, 5), off (CSR incidences, 5, 5) and y (cells, 5) from the generated loops,
-    `reversed_` flagging the faces whose global orientation is the reverse of the local one."""
+def _colours(m: s.Mesh) -> list[np.ndarray]:
+    """A distance-1 colouring of m's cells (greedy in cell order, as BlockMatrix's): no two
+    cells of one colour share a face."""
+    colour = np.full(m.n_cells, -1)
+    for c in range(m.n_cells):
+        taken = set()
+        for k in range(m.cell_face_offsets[c], m.cell_face_offsets[c + 1]):
+            f = m.cell_faces[k]
+            if f < m.n_interior:
+                taken.add(colour[m.neighbour[f] if m.owner[f] == c else m.owner[f]])
+        colour[c] = min(set(range(len(taken) + 1)) - taken)
+    return [np.flatnonzero(colour == k).astype(np.int32) for k in range(colour.max() + 1)]
+
+
+def _run(lib, m, layout, inputs, rhs, colours) -> dict[str, np.ndarray]:
+    """diag, diag_inv (cells, 5, 5), off (CSR incidences, 5, 5), y = A x, r = rhs - A x and
+    xs[k], x after colour k of one forward sweep, from the generated loops."""
 
     def p(a: np.ndarray) -> ctypes.c_void_p:
         return a.ctypes.data_as(ctypes.c_void_p)
 
+    reversed_, side, face_jac, bnd_jac, shift, x = inputs
     nc, nk = m.n_cells, m.n_incidences
-    csr_side = side
     if layout is None:
         offsets, length, faces, cell, total, stride = (
             m.cell_face_offsets, np.zeros(1, np.int32), m.cell_faces, np.zeros(1, np.int32), nk, 1,
@@ -449,20 +491,80 @@ def _matrix(
             layout[k] for k in ("offsets", "length", "cell_faces", "cell")
         )
         total, stride = layout["total"], layout["stride"]
-        side = np.zeros(total)
+        csr_side, side = side, np.zeros(total)
         side[layout["position"]] = csr_side
     soa = lambda a: np.ascontiguousarray(a.reshape(len(a), -1).T)
-    diag, off, y = np.zeros(25 * nc), np.zeros(25 * total), np.zeros(5 * nc)
+    colour_offsets = np.concatenate([[0], np.cumsum([len(c) for c in colours])]).astype(np.int32)
+    colour_rows = np.concatenate(colours).astype(np.int32)
+    out = {"diag": np.zeros(25 * nc), "diag_inv": np.zeros(25 * nc), "off": np.zeros(25 * total),
+           "y": np.zeros(5 * nc), "r": np.zeros(5 * nc), "xs": np.zeros(5 * nc * len(colours))}  # fmt: skip
     lib.run(
         ctypes.c_int(nc), ctypes.c_int(m.n_faces), ctypes.c_int(m.n_interior),
         ctypes.c_longlong(total), ctypes.c_longlong(stride), p(m.owner), p(m.neighbour),
         p(offsets), p(length), p(faces), p(cell), p(np.ascontiguousarray(side)),
-        p(reversed_.astype(np.uint8)), p(soa(face_jac)), p(soa(bnd_jac)), p(shift), p(soa(x)), p(diag), p(off), p(y),
+        p(reversed_.astype(np.uint8)), p(soa(face_jac)), p(soa(bnd_jac)), p(shift), p(soa(x)),
+        p(soa(rhs)), ctypes.c_int(len(colours)), p(colour_offsets), p(colour_rows),
+        *(p(out[k]) for k in ("diag", "diag_inv", "off", "y", "r", "xs")),
     )  # fmt: skip
-    off = off.reshape(25, total).T
+    off = out["off"].reshape(25, total).T
     if layout is not None:
         off = off[layout["position"]]
-    return diag.reshape(25, nc).T.reshape(nc, 5, 5), off.reshape(nk, 5, 5), y.reshape(5, nc).T
+    return {
+        "diag": out["diag"].reshape(25, nc).T.reshape(nc, 5, 5),
+        "diag_inv": out["diag_inv"].reshape(25, nc).T.reshape(nc, 5, 5),
+        "off": off.reshape(nk, 5, 5),
+        "y": out["y"].reshape(5, nc).T,
+        "r": out["r"].reshape(5, nc).T,
+        "xs": out["xs"].reshape(len(colours), 5, nc).transpose(0, 2, 1),
+    }
+
+
+def _host_matrix(m: s.Mesh, reversed_, face_jac, bnd_jac, shift):
+    """The host assembly (physics Euler::assemble, BlockMatrix): per cell, in the order of its
+    faces, left +face_jac[0], right -face_jac[1], boundary bnd_jac, then the shift; off-diagonal
+    left +face_jac[1], right -face_jac[0], zero on a boundary face. Returns diag, the magnitude
+    of its terms, off, the incidence sides and the dense matrix (5 n_cells square)."""
+    nc, ni = m.n_cells, m.n_interior
+    diag, off = np.zeros((nc, 5, 5)), np.zeros((m.n_incidences, 5, 5))
+    size = np.zeros((nc, 5, 5))
+    side = np.ones(m.n_incidences)
+    a = np.zeros((nc, 5, nc, 5))
+    for c in range(nc):
+        for k in range(m.cell_face_offsets[c], m.cell_face_offsets[c + 1]):
+            f = m.cell_faces[k]
+            if f >= ni:
+                diag[c] = diag[c] + bnd_jac[f]
+                size[c] += np.abs(bnd_jac[f])
+                continue
+            other = m.neighbour[f] if m.owner[f] == c else m.owner[f]
+            if (m.owner[f] == c) != reversed_[f]:
+                diag[c] = diag[c] + face_jac[f, 0]
+                size[c] += np.abs(face_jac[f, 0])
+                off[k] = face_jac[f, 1]
+            else:
+                side[k] = -1.0
+                diag[c] = diag[c] - face_jac[f, 1]
+                size[c] += np.abs(face_jac[f, 1])
+                off[k] = -face_jac[f, 0]
+            a[c, :, other, :] += off[k]
+        diag[c] = diag[c] + shift[c] * np.eye(5)
+        size[c] += shift[c] * np.eye(5)
+        a[c, :, c, :] += diag[c]
+    return diag, size, off, side, a.reshape(5 * nc, 5 * nc)
+
+
+def _blocks(m: s.Mesh, policy: str, rng: np.random.Generator, shift_low: float):
+    """Random face and boundary blocks (FP32 values when Jac is FP32), NaN where a face has
+    none: the physics never writes them, so they must not reach a result."""
+    ni, nf = m.n_interior, m.n_faces
+    face_jac, bnd_jac = rng.standard_normal((nf, 2, 5, 5)), rng.standard_normal((nf, 5, 5))
+    if policy != "fp64":
+        face_jac = face_jac.astype(np.float32).astype(np.float64)
+        bnd_jac = bnd_jac.astype(np.float32).astype(np.float64)
+    face_jac[ni:] = np.nan
+    bnd_jac[:ni] = np.nan
+    shift = rng.uniform(shift_low, shift_low + 1.0, m.n_cells)
+    return face_jac, bnd_jac, shift
 
 
 @pytest.mark.skipif(shutil.which("c++") is None, reason="needs a host C++ compiler")
@@ -476,14 +578,8 @@ def test_block_matrix_assembles_and_multiplies_as_the_host_block_matrix(
     m = s.mesh(meshes.build(kind, 4, 0.15, seed=9))
     nc, ni, nf = m.n_cells, m.n_interior, m.n_faces
     rng = np.random.default_rng(9)
-    face_jac, bnd_jac = rng.standard_normal((nf, 2, 5, 5)), rng.standard_normal((nf, 5, 5))
-    if policy != "fp64":  # Jac is stored in FP32
-        face_jac = face_jac.astype(np.float32).astype(np.float64)
-        bnd_jac = bnd_jac.astype(np.float32).astype(np.float64)
-    # Blocks a face does not have are never written by the physics: NaN must not reach a result.
-    face_jac[ni:] = np.nan
-    bnd_jac[:ni] = np.nan
-    shift, x = rng.uniform(1.0, 2.0, nc), rng.standard_normal((nc, 5))
+    face_jac, bnd_jac, shift = _blocks(m, policy, rng, 1.0)
+    x, rhs = rng.standard_normal((nc, 5)), rng.standard_normal((nc, 5))
     lib = _build_matrix(tmp_path, "cpu", policy)
     dev = _build_matrix(tmp_path, "gpu", policy) if backend == "gpu" else None
     # Local orientation, then random interior faces reversed (a partition's faces under the
@@ -491,52 +587,107 @@ def test_block_matrix_assembles_and_multiplies_as_the_host_block_matrix(
     flips = np.zeros(nf, bool)
     flips[:ni] = rng.random(ni) < 0.5
     for reversed_ in (np.zeros(nf, bool), flips):
-        # The host assembly (physics Euler::assemble, BlockMatrix): per cell, in the order of
-        # its faces, left +face_jac[0], right -face_jac[1], boundary bnd_jac, then the shift;
-        # off-diagonal left +face_jac[1], right -face_jac[0], zero on a boundary face.
-        diag, off = np.zeros((nc, 5, 5)), np.zeros((m.n_incidences, 5, 5))
-        size = np.zeros((nc, 5, 5))  # sum of the magnitudes of the diagonal's terms
-        side = np.ones(m.n_incidences)
-        a = np.zeros((nc, 5, nc, 5))
-        for c in range(nc):
-            for k in range(m.cell_face_offsets[c], m.cell_face_offsets[c + 1]):
-                f = m.cell_faces[k]
-                if f >= ni:
-                    diag[c] = diag[c] + bnd_jac[f]
-                    size[c] += np.abs(bnd_jac[f])
-                    continue
-                other = m.neighbour[f] if m.owner[f] == c else m.owner[f]
-                if (m.owner[f] == c) != reversed_[f]:
-                    diag[c] = diag[c] + face_jac[f, 0]
-                    size[c] += np.abs(face_jac[f, 0])
-                    off[k] = face_jac[f, 1]
-                else:
-                    side[k] = -1.0
-                    diag[c] = diag[c] - face_jac[f, 1]
-                    size[c] += np.abs(face_jac[f, 1])
-                    off[k] = -face_jac[f, 0]
-                a[c, :, other, :] += off[k]
-            diag[c] = diag[c] + shift[c] * np.eye(5)
-            size[c] += shift[c] * np.eye(5)
-            a[c, :, c, :] += diag[c]
-        a = a.reshape(5 * nc, 5 * nc)
-        expect = (a @ x.ravel()).reshape(nc, 5)
+        diag, size, off, side, a = _host_matrix(m, reversed_, face_jac, bnd_jac, shift)
+        ax = (a @ x.ravel()).reshape(nc, 5)
         bound = 64 * eps(policy) * (np.abs(a) @ np.abs(x.ravel())).reshape(nc, 5)
         inputs = (reversed_, side, face_jac, bnd_jac, shift, x)
-        runs = [_matrix(lib, m, None, *inputs), _matrix(lib, m, _sliced(m, 4), *inputs)]
+        no_sweep = [np.arange(0, dtype=np.int32)]
+        runs = [_run(lib, m, None, inputs, rhs, no_sweep)]
+        runs.append(_run(lib, m, _sliced(m, 4), inputs, rhs, no_sweep))
         if dev is not None:
-            runs += [_matrix(dev, m, None, *inputs), _matrix(dev, m, _sliced(m, 32), *inputs)]
-        for got_diag, got_off, y in runs:
-            np.testing.assert_array_equal(got_off, off)
+            runs += [_run(dev, m, lay, inputs, rhs, no_sweep) for lay in (None, _sliced(m, 32))]
+        for got in runs:
+            np.testing.assert_array_equal(got["off"], off)
             if policy == "fp32":  # the diagonal sums in FP32
-                assert (np.abs(got_diag - diag) <= 64 * eps(policy) * size).all()
+                assert (np.abs(got["diag"] - diag) <= 64 * eps(policy) * size).all()
             else:
-                np.testing.assert_array_equal(got_diag, diag)
-            assert (np.abs(y - expect) <= bound).all()
+                np.testing.assert_array_equal(got["diag"], diag)
+            assert (np.abs(got["y"] - ax) <= bound).all()
+            assert (np.abs(got["r"] - (rhs - ax)) <= bound + 64 * eps(policy) * np.abs(rhs)).all()
         # The sliced layout visits each cell's faces in the same order: the same bits as CSR.
         for sliced, csr in zip(runs[1::2], runs[::2], strict=True):
-            for got, ref in zip(sliced, csr, strict=True):
-                np.testing.assert_array_equal(got, ref)
+            for k in ("diag", "off", "y", "r"):
+                np.testing.assert_array_equal(sliced[k], csr[k])
+
+
+@pytest.mark.skipif(shutil.which("c++") is None, reason="needs a host C++ compiler")
+@pytest.mark.parametrize("policy", PRECISIONS)
+@pytest.mark.parametrize("kind", ["tet", "hex", "poly", "hybrid"])
+def test_block_gauss_seidel_relaxes_each_colour_as_the_host_block_matrix(
+    tmp_path: Path, backend: str, policy: str, kind: str
+) -> None:
+    # One forward sweep over a distance-1 colouring, each colour checked from the state the
+    # generated sweep reached before it (rounding then does not compound, the protocol agreed
+    # with CFD - Euler): x_c = D_c^-1 (rhs_c - sum over c's faces of off x_across), the other
+    # cells untouched, within 64 eps(compute) ||D_c^-1|| (|rhs_c| + |A_c| |x|) per component.
+    if backend == "metal":
+        pytest.skip("kernels/blocks.py is not generated for Metal (E1013, see the inverse test)")
+    m = s.mesh(meshes.build(kind, 4, 0.15, seed=11))
+    nc = m.n_cells
+    rng = np.random.default_rng(11)
+    face_jac, bnd_jac, shift = _blocks(m, policy, rng, 10.0)  # well-conditioned diagonals
+    x, rhs = rng.standard_normal((nc, 5)), rng.standard_normal((nc, 5))
+    reversed_ = np.zeros(m.n_faces, bool)
+    diag, _, _, side, a = _host_matrix(m, reversed_, face_jac, bnd_jac, shift)
+    a = a.reshape(nc, 5, nc, 5)
+    inv = np.linalg.inv(diag)
+    colours = _colours(m)
+    inputs = (reversed_, side, face_jac, bnd_jac, shift, x)
+    runs = [_run(_build_matrix(tmp_path, "cpu", policy), m, lay, inputs, rhs, colours)
+            for lay in (None, _sliced(m, 4))]  # fmt: skip
+    if backend == "gpu":
+        dev = _build_matrix(tmp_path, "gpu", policy)
+        runs += [_run(dev, m, lay, inputs, rhs, colours) for lay in (None, _sliced(m, 32))]
+    stored = x.astype(np.float32).astype(np.float64) if policy == "fp32" else x  # Residual
+    for got in runs:
+        before = stored
+        for k, rows in enumerate(colours):
+            after = got["xs"][k]
+            others = np.setdiff1d(np.arange(nc), rows)
+            np.testing.assert_array_equal(after[others], before[others])
+            for c in rows:
+                coupled = sum(a[c, :, j, :] @ before[j] for j in range(nc) if j != c)
+                expect = inv[c] @ (rhs[c] - coupled)
+                magnitude = np.abs(rhs[c]) + sum(
+                    np.abs(a[c, :, j, :]) @ np.abs(before[j] if j != c else after[c])
+                    for j in range(nc)
+                )
+                bound = 64 * eps(policy) * np.abs(inv[c]).sum(axis=1).max() * magnitude
+                assert (np.abs(after[c] - expect) <= bound).all(), (c, k)
+            before = after
+    for sliced, csr in zip(runs[1::2], runs[::2], strict=True):
+        np.testing.assert_array_equal(sliced["xs"], csr["xs"])
+
+
+@pytest.mark.skipif(shutil.which("c++") is None, reason="needs a host C++ compiler")
+@pytest.mark.parametrize("policy", ["fp64", "fp32+acc64"])
+def test_block_operators_keep_the_accumulation_precision(
+    tmp_path: Path, backend: str, policy: str
+) -> None:
+    # A row whose diagonal 1 + 2^-30 (FP64 under fp32+acc64) meets an off-diagonal -1, x = 1:
+    # A x = 2^-30 there, which a diagonal product or a sum in FP32 rounds to 0.
+    if backend == "metal":
+        pytest.skip("kernels/blocks.py is not generated for Metal (E1013, see the inverse test)")
+    m = s.mesh(meshes.build("hex", 3))
+    nc, ni, nf = m.n_cells, m.n_interior, m.n_faces
+    face_jac, bnd_jac = np.zeros((nf, 2, 5, 5)), np.zeros((nf, 5, 5))
+    face_jac[ni:] = np.nan
+    bnd_jac[:ni] = np.nan
+    f = 0
+    left = m.owner[f]
+    face_jac[f, 1] = -np.eye(5)  # the left cell's coupling to the right one
+    shift = np.full(nc, 1.0 + 2.0**-30)
+    x, rhs = np.ones((nc, 5)), np.zeros((nc, 5))
+    reversed_ = np.zeros(nf, bool)
+    _, _, _, side, _ = _host_matrix(m, reversed_, face_jac, bnd_jac, shift)
+    inputs = (reversed_, side, face_jac, bnd_jac, shift, x)
+    libs = [_build_matrix(tmp_path, "cpu", policy)]
+    if backend == "gpu":
+        libs.append(_build_matrix(tmp_path, "gpu", policy))
+    for lib in libs:
+        got = _run(lib, m, None, inputs, rhs, [np.arange(0, dtype=np.int32)])
+        np.testing.assert_array_equal(got["y"][left], np.full(5, 2.0**-30))
+        np.testing.assert_array_equal(got["r"][left], np.full(5, -(2.0**-30)))
 
 
 ACCUM_REDUCTION = """
