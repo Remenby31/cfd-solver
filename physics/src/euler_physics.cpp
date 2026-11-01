@@ -106,7 +106,11 @@ class EulerPhysics final : public runtime::Physics {
     std::optional<Manufactured> mms;
     if (in.verification) mms.emplace(in.verification->text);
     set_boundaries(mms ? &*mms : nullptr);
-    if (in.time.kind == "steady") {
+    // A steady case on a device steps explicitly there (device_step): no host Jacobian, no linear
+    // solver.
+    if (in.time.kind == "steady" && ctx.device >= 0) {
+      euler_.set_second_order(false);
+    } else if (in.time.kind == "steady") {
       matrix_.emplace(mesh);
       if (in.time.linear_solver == "multigrid") {
         multigrid_.emplace(mesh, ctx.geometry);

@@ -1288,6 +1288,17 @@ TEST_CASE("on a device, a verification case converges to the host's discrete sol
   REQUIRE(host.status == ExitStatus::finished);
   REQUIRE(dev.status == ExitStatus::finished);
   CHECK(Json::parse(read(dev.run / "run.json"))["status"] == "converged");
+  // The device run sets up no host linear solver (no BlockMatrix, no multigrid); the host run does.
+  auto linear_events = [](const fs::path& run) {
+    int count = 0;
+    std::istringstream lines(read(run / "log.jsonl"));
+    for (std::string line; std::getline(lines, line);) {
+      if (!line.empty() && Json::parse(line)["source"] == "linear") ++count;
+    }
+    return count;
+  };
+  CHECK(linear_events(host.run) > 0);
+  CHECK(linear_events(dev.run) == 0);
   const auto mesh = autan::io::read_mesh(mesh_path);
   const auto g = autan::compute_geometry(mesh);
   const auto n = static_cast<std::size_t>(mesh.n_cells());
