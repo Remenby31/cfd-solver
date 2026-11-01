@@ -98,7 +98,6 @@ function Compare() {
                 devices: devicesLabel(d.data.run.devices),
                 backend: d.data.run.solver.backend,
                 solver: d.data.run.solver.commit,
-                deterministic: d.data.run.deterministic,
               },
             }),
           ])

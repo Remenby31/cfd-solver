@@ -1,5 +1,5 @@
 ---
-source_hash: "5659b0834a0f"
+source_hash: "12a9f0032af3"
 ---
 
 # Calculs
@@ -34,4 +34,4 @@ Vous pouvez ouvrir un calcul en cours (`running`) : l'historique est lisible, la
 
 ## Comment un calcul est identifié
 
-Chaque calcul enregistre le hash du maillage, le hash du cas, le commit du solveur et la précision. Leur combinaison, avec le backend et les périphériques, est l'`identity` du calcul. En mode déterministe bit à bit, deux calculs de même identité arrêtés à la même itération écrivent le même historique et les mêmes données de solution, au bit près. [run.json](../contracts/results.md#runjson) définit chaque champ.
+Chaque calcul enregistre le hash du maillage, le hash du cas, le commit du solveur et la précision. Leur combinaison, avec le backend et les périphériques, est l'`identity` du calcul ([Identity](../contracts/results.md#identity)). Avec `physics.reproducibility = "run"` ou `"ranks"`, deux calculs du solveur de même identité arrêtés à la même itération écrivent le même historique et les mêmes données de solution, au bit près. [run.json](../contracts/results.md#runjson) définit chaque champ.

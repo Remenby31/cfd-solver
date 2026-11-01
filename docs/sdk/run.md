@@ -3,7 +3,7 @@
 `autan run` plans a case, refuses it on any error, then writes a run directory as specified in [results.md](../contracts/results.md) under `DIR` (default `./runs`).
 
 ```text
-autan run CASE --mesh-info MESHINFO [--backend fake|cpu|cuda|hip] [--device-count N] [--deterministic] [--runs DIR] [--json]
+autan run CASE --mesh-info MESHINFO [--backend fake|cpu|cuda|hip] [--device-count N] [--runs DIR] [--json]
 ```
 
 In Python: `case.run(mesh_info, backend=..., runs="runs")`, which returns `autan.Results`.

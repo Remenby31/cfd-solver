@@ -29,7 +29,7 @@ Every table rejects unknown keys; every key is present, `null` where it does not
 | `case` | `name`; `sha256` the case hash; `toml` the exact text to write as `case.toml` |
 | `mesh` | `path` absolute path of the mesh file or polyMesh directory; `sha256` expected mesh hash ([mesh-info.md](mesh-info.md)), checked by the runtime |
 | `precision` | `"fp32+acc64"` or `"fp64"` |
-| `deterministic` | Bitwise-deterministic mode requested |
+| `reproducibility` | The case's `physics.reproducibility`: `none`, `run` or `ranks` ([case-schema.md](case-schema.md#physics)) |
 | `devices` | `kind` (`cpu`, `cuda`, `hip`) and `count`: the number of ranks, one device each (on `cuda` and `hip`, rank r takes the device r modulo the devices its node shows). The runtime refuses a launch with another number of ranks (`E0705` at `devices.count`). |
 | `physics` | `kind` (`compressible`, `incompressible`); `turbulence`: `model`, `base` (DDES only: `sa` or `sst`), `wall_model` (WMLES only), `nu_tilde_ratio` (exactly for SA and DDES on SA), `intensity` and `viscosity_ratio` (exactly for SST and DDES on SST). DDES and WMLES require an unsteady `time`. |
 | `freestream` | Closed state: `density` (kg/m³), `pressure` (Pa; 0 for incompressible), `temperature` (K; null for incompressible), `velocity` (m/s, mesh axes), `speed` (m/s), `viscosity` (dynamic, Pa·s); as given: `mach`, `re`, `ref_length` (m), `aoa` and `sideslip` (rad); turbulence state: `nu_tilde` (m²/s), `k` (m²/s²), `omega` (1/s), null when the model has none |

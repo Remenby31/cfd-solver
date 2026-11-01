@@ -153,7 +153,6 @@ def test_order_gate_recovers_the_order_of_the_error(
     assert all(
         len(r["mesh_sha256"]) == 64 and len(r["solver_commit"]) == 40 for r in report["runs"]
     )
-    assert all(not autan.Results.open(p).run.deterministic for p in runs)
 
 
 @pytest.mark.parametrize(

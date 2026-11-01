@@ -256,7 +256,6 @@ class FakeBackend:
             mesh=MeshIdentity(path=str(case.mesh_path), sha256=mesh_info.source.sha256),
             solver=solver,
             precision=spec.physics.precision,
-            deterministic=True,
             devices=devices,
             started=iso(started),
             finished=None,

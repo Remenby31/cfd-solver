@@ -146,7 +146,6 @@ class RunInfo(_Strict):
     mesh: MeshIdentity
     solver: Solver
     precision: Literal["fp32+acc64", "fp64"]
-    deterministic: bool
     devices: Devices
     started: str
     finished: str | None

@@ -94,6 +94,12 @@ struct PhysicsContext {
   /// stream (a cudaStream_t) for the physics' work and ghost exchanges. -1 and null on the CPU.
   int device = -1;
   void* stream = nullptr;
+  /// For each face of `mesh`, its face in the mesh the run read and whether it runs against it
+  /// (1: owner and neighbour swapped, area vector negated): with mesh.cell_global_id() and
+  /// mesh.ghost_translation(), the keys a physics orders its sums by under reproducibility
+  /// "ranks", so that its bits do not depend on the partition (solver-input.md).
+  std::span<const std::int64_t> face_global_id;
+  std::span<const std::uint8_t> face_reversed;
   /// The colour of each cell of `mesh` (owned and ghosts) in the global distance-1 colouring of
   /// the mesh (colour_cells: neighbours across faces and periodic pairs never share one), and
   /// the number of colours: the same on any number of ranks and in any cell order, so a
@@ -167,6 +173,9 @@ struct PhysicsRefusal {
   std::string message;
   std::string path;              ///< document path of the offending key; also `data.path`
   std::string data_json = "{}";  ///< machine-readable details: the text of a JSON object
+  /// The registry code reported: E0706 (no implementation for the input) unless another code
+  /// says more, as E1109 for a reproducibility the physics cannot honour.
+  std::string code = "E0706";
 };
 
 /// What a physics supports beyond its key (media, zones, conditions, the number of ranks the

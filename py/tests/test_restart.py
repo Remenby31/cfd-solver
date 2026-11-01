@@ -15,7 +15,7 @@ import jsonschema
 import pytest
 from autan.cli import json_schema, main
 
-from tests.conftest import CRM_HL, FIXTURES
+from tests.conftest import CRM_HL, FIXTURES, identity_of
 
 
 def history(result: autan.Results) -> list[str]:
@@ -50,20 +50,9 @@ def test_continue_extends_the_run_as_if_it_never_stopped(
     )
     assert start.solution_sha256 == hashlib.sha256(solution).hexdigest()
     run = resumed.run
-    parts = [
-        run.case.sha256,
-        run.mesh.sha256,
-        run.solver.commit,
-        run.precision,
-        run.solver.backend,
-        run.devices.kind,
-        str(run.devices.count),
-        start.identity,
-        "continue",
-        "30",
-        start.solution_sha256,
-    ]
-    assert run.identity == hashlib.sha256("\n".join(parts).encode()).hexdigest()
+    assert run.start is not None
+    assert (run.start.mode, run.start.iterations) == ("continue", 30)
+    assert run.identity == identity_of(run.document())
 
 
 def test_warm_start_counts_from_one(

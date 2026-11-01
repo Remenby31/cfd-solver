@@ -12,6 +12,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <optional>
 #include <random>
 #include <span>
@@ -785,7 +786,7 @@ Prepared prepare(const fs::path& input_file, const PhysicsRegistry& registry, in
     if (auto refusal = entry->scope(p.input, ranks)) {
       auto data = nlohmann::json::parse(refusal->data_json);
       data["path"] = refusal->path;
-      throw InputError(Diagnostic{.code = "E0706",
+      throw InputError(Diagnostic{.code = refusal->code,
                                   .message = std::move(refusal->message),
                                   .path = std::move(refusal->path),
                                   .data_json = data.dump()});
@@ -864,6 +865,14 @@ class Run final : public Log {
     } else {
       ghosts_ = std::make_unique<NoGhosts>();
     }
+    if (local_) {
+      face_global_id_ = local_->face_global_id;
+      face_reversed_ = local_->face_reversed;
+    } else {
+      face_global_id_.resize(at(p_.mesh.n_faces()));
+      std::iota(face_global_id_.begin(), face_global_id_.end(), std::int64_t{0});
+      face_reversed_.assign(face_global_id_.size(), 0);
+    }
     colour_cells_of_physics();
     // Rank 0 names the run: its clock and its random suffix.
     const auto started = std::chrono::system_clock::now();
@@ -911,7 +920,6 @@ class Run final : public Log {
           {"sha256", p_.mesh_hash}}},
         {"solver", {{"version", build.version}, {"commit", build.commit}, {"backend", backend}}},
         {"precision", in.precision},
-        {"deterministic", in.deterministic},
         {"devices", {{"kind", in.device_kind}, {"count", in.device_count}}},
         {"started", started_at},
         {"finished", nullptr},
@@ -956,6 +964,12 @@ class Run final : public Log {
     if (path.empty()) throw std::runtime_error("rank 0 could not create the run directory");
     if (comm_.rank() != 0) dir_ = std::make_unique<RunDirectory>(fs::path(path));
     if (comm_.size() > 1) log_partition();
+    if (comm_.size() > 1 && p_.input.reproducibility != "ranks") {
+      note("info", "solver",
+           "results depend on the number of ranks: reproducibility is " + p_.input.reproducibility +
+               ", not ranks",
+           "", Json{{"mode", p_.input.reproducibility}, {"ranks", comm_.size()}}.dump());
+    }
     if (gpu_) {
       note(
           "info", "cuda",
@@ -984,6 +998,8 @@ class Run final : public Log {
                                  .initial = initial,
                                  .device = gpu_ ? gpu_->index() : -1,
                                  .stream = gpu_ ? gpu_->stream() : nullptr,
+                                 .face_global_id = face_global_id_,
+                                 .face_reversed = face_reversed_,
                                  .cell_colours = colours_,
                                  .n_colours = n_colours_,
                                  .group_offsets = group_offsets_,
@@ -1040,7 +1056,10 @@ class Run final : public Log {
   std::optional<LocalPartition> make_part() {
     const Mesh& mesh = p_.mesh;
     const std::int32_t n = comm_.size();
-    if (n == 1 && mesh.periodic_pairs().empty()) return std::nullopt;
+    // Reproducibility "ranks" computes on a partition, one part on one rank,
+    // so that a physics finds the same global keys on any number of ranks.
+    if (n == 1 && mesh.periodic_pairs().empty() && p_.input.reproducibility != "ranks")
+      return std::nullopt;
     std::vector<std::int32_t> parts(at(mesh.n_cells()), 0);
     if (n > 1) {
       parts = partition_cells(mesh, n,
@@ -1590,6 +1609,10 @@ class Run final : public Log {
   Geometry geometry_;
   CellGroups groups_;  // the physics' groups, over p_.mesh's cells
   std::optional<LocalPartition> local_;
+  // PhysicsContext's global keys of the physics' faces: the partition's, or
+  // the mesh's own (identity, none reversed).
+  std::vector<std::int64_t> face_global_id_;
+  std::vector<std::uint8_t> face_reversed_;
   std::vector<std::int32_t> colours_;  // global colouring, the physics mesh's cells
   std::int32_t n_colours_ = 0;
   // The groups this rank owns, over the physics mesh's owned cells, and their colouring.

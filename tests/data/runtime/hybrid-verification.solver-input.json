@@ -2,15 +2,15 @@
   "schema": "autan.solver-input/1",
   "case": {
     "name": "mms",
-    "sha256": "55c5c46633c81147c05dd02d10f6752095dffb9d7dfccbf05845968e30b535b3",
-    "toml": "schema = \"autan.case/1\"\nname = \"mms\"\nmesh = \"../mesh/hybrid/polyMesh\"\nboundaries = []\ncell_zones = []\nmonitors = []\n\n[physics]\nkind = \"compressible\"\nprecision = \"fp32+acc64\"\n\n[physics.turbulence]\nmodel = \"inviscid\"\n\n[physics.gas]\nkind = \"ideal-gas\"\nname = \"mms\"\nmolar_mass = \"0.028970253024390245 kg / mol\"\ngamma = 1.4\nprandtl = 0.72\n\n[physics.gas.viscosity]\nlaw = \"constant\"\nmu = \"0.001 Pa * s\"\n\n[freestream]\nmach = 0.3\naoa = \"0.0 deg\"\nsideslip = \"0.0 deg\"\ntemperature = \"300.0 K\"\npressure = \"101325.0 Pa\"\n\n[time]\nkind = \"steady\"\nmax_iterations = 10000\nresidual_orders = 8.0\n\n[verification.manufactured]\npath = \"euler.mms.json\"\nsha256 = \"7555af6d04b90046c676c6f9c15e26507ff96f0cf763d877ba5f30c63788bf7e\"\n"
+    "sha256": "78a977274d51e6eae58ea4037332a531de9fbf054c1ebb40874be22c645ed68e",
+    "toml": "schema = \"autan.case/1\"\nname = \"mms\"\nmesh = \"../mesh/hybrid/polyMesh\"\nboundaries = []\ncell_zones = []\nmonitors = []\n\n[physics]\nkind = \"compressible\"\nprecision = \"fp32+acc64\"\nreproducibility = \"run\"\n\n[physics.turbulence]\nmodel = \"inviscid\"\n\n[physics.gas]\nkind = \"ideal-gas\"\nname = \"mms\"\nmolar_mass = \"0.028970253024390245 kg / mol\"\ngamma = 1.4\nprandtl = 0.72\n\n[physics.gas.viscosity]\nlaw = \"constant\"\nmu = \"0.001 Pa * s\"\n\n[freestream]\nmach = 0.3\naoa = \"0.0 deg\"\nsideslip = \"0.0 deg\"\ntemperature = \"300.0 K\"\npressure = \"101325.0 Pa\"\n\n[time]\nkind = \"steady\"\nmax_iterations = 10000\nresidual_orders = 8.0\n\n[verification.manufactured]\npath = \"euler.mms.json\"\nsha256 = \"7555af6d04b90046c676c6f9c15e26507ff96f0cf763d877ba5f30c63788bf7e\"\n"
   },
   "mesh": {
     "path": "@MESH@",
     "sha256": "0edcff657743a2a039ab7814e7f9f276bc5631530bc3adf519abe6dcb290ebe6"
   },
   "precision": "fp32+acc64",
-  "deterministic": false,
+  "reproducibility": "run",
   "devices": {
     "kind": "cpu",
     "count": 1

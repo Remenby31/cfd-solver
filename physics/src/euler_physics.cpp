@@ -1057,6 +1057,15 @@ bool same_gas(const runtime::Medium& a, const runtime::Medium& b) {
 // What the Euler physics runs beyond its key: every cell zone of one ideal gas, boundary
 // conditions that apply to inviscid flow, and steady runs on one rank without periodic pairs.
 std::optional<runtime::PhysicsRefusal> euler_scope(const runtime::SolverInput& in, int ranks) {
+  // Its face loops still sum in local face order (#199): the same bits on any number of ranks
+  // are not yet the physics' to give.
+  if (in.reproducibility == "ranks") {
+    return runtime::PhysicsRefusal{
+        .message = "the Euler physics does not give the same bits on any number of ranks yet",
+        .path = "reproducibility",
+        .data_json = "{}",
+        .code = "E1109"};
+  }
   // The multigrid agglomerates one mesh's cells: on a partition, or with periodic image ghosts,
   // it would be another algorithm. Gauss-Seidel sweeps colours by global id, the same anywhere.
   if (in.time.kind == "steady" && in.time.linear_solver == "multigrid" &&

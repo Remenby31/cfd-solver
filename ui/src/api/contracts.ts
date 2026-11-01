@@ -30,7 +30,6 @@ export interface Run {
   mesh: { path: string; sha256: string };
   solver: { version: string; commit: string; backend: "cuda" | "hip" | "cpu" | "fake" };
   precision: "fp32+acc64" | "fp64";
-  deterministic: boolean;
   devices: { kind: "cuda" | "hip" | "cpu"; count: number };
   started: string;
   finished: string | null;

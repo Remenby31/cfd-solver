@@ -226,6 +226,8 @@ class WMLES(Spec):
 
 Turbulence = Annotated[Inviscid | Laminar | SA | SST | DDES | WMLES, Field(discriminator="model")]
 Precision = Literal["fp32+acc64", "fp64"]
+# What bits a run guarantees to repeat (case-schema.md#physics).
+Reproducibility = Literal["none", "run", "ranks"]
 
 
 def _air() -> IdealGas:
@@ -240,6 +242,7 @@ class Compressible(Spec):
     kind: Literal["compressible"] = "compressible"
     turbulence: Turbulence
     precision: Precision = "fp32+acc64"
+    reproducibility: Reproducibility = "run"
     gas: IdealGas = Field(default_factory=_air)
 
 
@@ -249,6 +252,7 @@ class Incompressible(Spec):
     kind: Literal["incompressible"] = "incompressible"
     turbulence: Turbulence
     precision: Precision = "fp32+acc64"
+    reproducibility: Reproducibility = "run"
     fluid: ConstantDensityFluid
 
 

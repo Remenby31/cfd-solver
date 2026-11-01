@@ -4,7 +4,6 @@ Expected values come from docs/contracts/results.md and case-schema.md (ideal-ga
 law, Sutherland's law, the force projections), recomputed here independently.
 """
 
-import hashlib
 import json
 import math
 import re
@@ -26,7 +25,7 @@ import pytest
 from autan import cgns
 from autan.cli import json_schema, main
 
-from tests.conftest import CRM_HL, EXAMPLES, FIXTURES
+from tests.conftest import CRM_HL, EXAMPLES, FIXTURES, identity_of
 
 R_UNIVERSAL = 8.314462618
 CGNSCHECK = shutil.which("cgnscheck")
@@ -65,16 +64,7 @@ def test_run_directory_and_metadata_follow_the_contract(crm_run: autan.Results) 
     assert re.fullmatch(r"[0-9a-f]{40}", run["solver"]["commit"])
     assert run["case"]["sha256"] == autan.load(path / "case.toml").spec.hash()
     assert run["mesh"]["path"] == str((EXAMPLES / "crm-hl.cgns").resolve())
-    parts = [
-        run["case"]["sha256"],
-        run["mesh"]["sha256"],
-        run["solver"]["commit"],
-        run["precision"],
-        "fake",
-        run["devices"]["kind"],
-        str(run["devices"]["count"]),
-    ]
-    assert run["identity"] == hashlib.sha256("\n".join(parts).encode()).hexdigest()
+    assert run["identity"] == identity_of(run)
     assert run["iterations"] == 100
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", run["finished"])
 
@@ -244,7 +234,7 @@ def test_unsteady_run_records_time_and_average(
     np.testing.assert_array_equal(result.field("Density", mean=True), result.field("Density"))
 
 
-def test_deterministic_runs_produce_identical_data(
+def test_runs_of_one_identity_produce_identical_data(
     tmp_path: Path, crm_mesh: autan.MeshInfo
 ) -> None:
     case = autan.load(EXAMPLES / "crm_hl.py")

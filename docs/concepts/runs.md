@@ -30,4 +30,4 @@ You can open a run while it is `running`: the history is readable, the solution 
 
 ## How runs are identified
 
-Every run records the mesh hash, the case hash, the solver commit and the precision. Their combination, with the backend and the devices, is the run's `identity`. In the bitwise-deterministic mode, two runs with the same identity that stop at the same iteration write the same history and solution data, bit for bit. [run.json](../contracts/results.md#runjson) defines each field.
+Every run records the mesh hash, the case hash, the solver commit and the precision. Their combination, with the backend and the devices, is the run's `identity` ([Identity](../contracts/results.md#identity)). With `physics.reproducibility = "run"` or `"ranks"`, two runs of the solver with the same identity that stop at the same iteration write the same history and solution data, bit for bit. [run.json](../contracts/results.md#runjson) defines each field.

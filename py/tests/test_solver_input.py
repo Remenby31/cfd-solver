@@ -40,12 +40,11 @@ def test_crm_hl_input_is_resolved_and_closed_in_si(
         "cuda",
         "--device-count",
         "8",
-        "--deterministic",
     )
     assert status == 0
     jsonschema.Draft202012Validator(json_schema("solver-input")).validate(document)
     assert document["devices"] == {"kind": "cuda", "count": 8}
-    assert document["deterministic"] is True
+    assert document["reproducibility"] == "run"  # the case's default (case-schema.md#physics)
 
     # The case hash is SHA-256 of the RFC 8785 form of the (fully defaulted) case document.
     canonical = rfc8785.dumps(tomllib.loads(document["case"]["toml"]))
@@ -222,6 +221,39 @@ def test_each_published_schema_has_its_identifier(name: str) -> None:
     schema = json_schema(name)
     assert schema["$id"] == autan.version.SCHEMAS[name]
     assert schema["properties"]["schema"]["const"] == autan.version.SCHEMAS[name]
+
+
+@pytest.mark.parametrize("mode", ["none", "run", "ranks"])
+def test_reproducibility_reaches_the_runtime_and_the_hash(
+    mode: str,
+    write_case: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    body = CRM_HL.replace("autan.SA())", f"autan.SA(), reproducibility={mode!r})")
+    case = write_case(body, name=f"{mode}.py")
+    spec = autan.load(case).spec
+    copy = tmp_path / "copy.toml"
+    copy.write_text(autan.load(case).to_toml())
+    assert autan.load(copy).spec == spec
+    assert (spec.hash() == autan.load(write_case(CRM_HL, name="default.py")).spec.hash()) == (
+        mode == "run"  # the default
+    )
+    assert main(["prepare", str(case), "--mesh-info", str(FIXTURES / "crm-hl.meshinfo.json")]) == 0
+    document = json.loads(capsys.readouterr().out)
+    jsonschema.Draft202012Validator(json_schema("solver-input")).validate(document)
+    assert document["reproducibility"] == mode
+
+
+def test_the_runtime_mode_is_the_case_s(
+    write_case: Callable[..., Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    case = write_case(CRM_HL)
+    assert main(["prepare", str(case), "--mesh-info", str(FIXTURES / "crm-hl.meshinfo.json")]) == 0
+    document = json.loads(capsys.readouterr().out)
+    document["reproducibility"] = "none"  # the embedded case says "run"
+    with pytest.raises(ValidationError, match="reproducibility"):
+        autan.solver_input.SolverInput.model_validate(document)
 
 
 def test_the_linear_solver_is_a_steady_choice(

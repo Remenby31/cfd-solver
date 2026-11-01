@@ -128,7 +128,6 @@ def command_run(args: argparse.Namespace) -> int:
             if args.backend == "fake"
             else SolverBackend(
                 devices=Devices(kind=args.backend, count=args.device_count),
-                deterministic=args.deterministic,
             )
         )
         previous = signal.signal(signal.SIGTERM, _interrupt)
@@ -187,9 +186,7 @@ def command_prepare(args: argparse.Namespace) -> int:
         start = resolve_start(
             case.spec, mesh_info, _start(args), "warm" if args.warm else "continue"
         )
-        document = build_solver_input(
-            case, mesh_info, devices=devices, deterministic=args.deterministic, start=start
-        ).document()
+        document = build_solver_input(case, mesh_info, devices=devices, start=start).document()
         text = json.dumps(document, indent=2) + "\n"
         if args.output:
             try:
@@ -377,7 +374,6 @@ def parser() -> argparse.ArgumentParser:
         help="fake (synthetic results) or the device kind autan-run runs on (default: fake)",
     )
     sub.add_argument("--device-count", type=_positive, default=1, help="autan-run: devices")
-    sub.add_argument("--deterministic", action="store_true", help="autan-run: bitwise mode")
     sub.add_argument("--start", help="run directory to start from (default: the freestream)")
     sub.add_argument("--warm", action="store_true", help="with --start: warm-start, count from 1")
     sub.add_argument("--runs", default="runs", help="directory of run directories")
@@ -394,7 +390,6 @@ def parser() -> argparse.ArgumentParser:
     sub.add_argument("--mesh-info", required=True, help="MeshInfo JSON of the case's mesh")
     sub.add_argument("--device-kind", choices=["cpu", "cuda", "hip"], default="cpu")
     sub.add_argument("--device-count", type=_positive, default=1)
-    sub.add_argument("--deterministic", action="store_true", help="bitwise-deterministic run")
     sub.add_argument("--start", help="run directory to start from (default: the freestream)")
     sub.add_argument("--warm", action="store_true", help="with --start: warm-start, count from 1")
     sub.add_argument("-o", "--output", help="file to write (default: stdout)")
