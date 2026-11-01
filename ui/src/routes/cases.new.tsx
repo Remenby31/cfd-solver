@@ -185,6 +185,26 @@ function CaseEditor() {
     setFocusRule(null);
   }, [focusRule]);
 
+  // The freestream is given by a Reynolds number or by a pressure (case-schema.md#freestream,
+  // E0306); an inviscid flow has no Reynolds number to give, unless the case already has one.
+  const [givenBy, setGivenBy] = useState<"re" | "pressure">("re");
+  const inviscid = form.physics.turbulence === "inviscid";
+  const given: "re" | "pressure" = form.freestream.re.trim()
+    ? "re"
+    : form.freestream.pressure.trim() || inviscid
+      ? "pressure"
+      : givenBy;
+  const shown = rendered.data;
+  const uncoveredZones =
+    shown?.ok && shown.plan ? shown.plan.boundaries.filter((b) => b.condition === null).length : 0;
+  const announcement =
+    shown?.ok === false
+      ? "The case is not complete yet."
+      : uncoveredZones > 0
+        ? `${uncoveredZones} ${uncoveredZones === 1 ? "zone" : "zones"} without a condition.`
+        : shown?.plan?.ok
+          ? "The plan is ready."
+          : "";
   const set = <K extends keyof CaseForm>(key: K, value: CaseForm[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
   const setIn = <K extends "physics" | "freestream" | "time">(
@@ -268,7 +288,7 @@ function CaseEditor() {
                     }));
                   }}
                   options={(meshes.data ?? []).map((m) => ({ value: m.name, label: m.name }))}
-                  placeholder="Choose a MeshInfo…"
+                  placeholder="Choose a mesh…"
                 />
               </Field>
             </Section>
@@ -384,24 +404,50 @@ function CaseEditor() {
                   units={UNITS.angle}
                 />
               </Field>
-              <Field label="Reynolds number" hint="per reference length">
-                <NumberInput
-                  value={form.freestream.re}
-                  onChange={(v) => setIn("freestream", "re", v)}
-                />
-              </Field>
-              <Field label="Reference length">
+              {(!inviscid || form.freestream.re.trim() !== "") && (
+                <Field label="Given by" className="col-span-2">
+                  <SelectInput
+                    value={given}
+                    onChange={(v) => {
+                      if (!v || v === given) return;
+                      setGivenBy(v);
+                      // The case states exactly one of the two (E0306): the other is cleared.
+                      setForm((f) => ({
+                        ...f,
+                        freestream:
+                          v === "pressure"
+                            ? { ...f.freestream, re: "" }
+                            : { ...f.freestream, pressure: "" },
+                      }));
+                    }}
+                    options={[
+                      { value: "re", label: "Reynolds number" },
+                      { value: "pressure", label: "Pressure" },
+                    ]}
+                  />
+                </Field>
+              )}
+              {given === "re" ? (
+                <Field label="Reynolds number" hint="per reference length">
+                  <NumberInput
+                    value={form.freestream.re}
+                    onChange={(v) => setIn("freestream", "re", v)}
+                  />
+                </Field>
+              ) : (
+                <Field label="Pressure">
+                  <QuantityInput
+                    value={form.freestream.pressure}
+                    onChange={(v) => setIn("freestream", "pressure", v)}
+                    units={UNITS.pressure}
+                  />
+                </Field>
+              )}
+              <Field label="Reference length" hint={given === "re" ? undefined : "for moments"}>
                 <QuantityInput
                   value={form.freestream.ref_length}
                   onChange={(v) => setIn("freestream", "ref_length", v)}
                   units={UNITS.length}
-                />
-              </Field>
-              <Field label="Pressure" hint="optional">
-                <QuantityInput
-                  value={form.freestream.pressure}
-                  onChange={(v) => setIn("freestream", "pressure", v)}
-                  units={UNITS.pressure}
                 />
               </Field>
               <Field label="Temperature" hint="default 288.15 K">
@@ -623,8 +669,26 @@ function CaseEditor() {
               The code below is from an earlier version of the case: {rendered.error.message}
             </Note>
           )}
+          {/* Mounted for good, so that a screen reader hears what blocks the case as it changes. */}
+          <p role="status" className="sr-only">
+            {announcement}
+          </p>
+          <div className="flex justify-end">
+            <CaseActions
+              name={form.name}
+              // Only the case shown, once it is the form's: an edit not yet rendered waits.
+              rendered={
+                rendered.data?.ok && !rendered.isPlaceholderData && settled === form
+                  ? rendered.data
+                  : null
+              }
+            />
+          </div>
           {rendered.data?.ok === false ? (
-            <Diagnostics items={rendered.data.diagnostics} testId="diagnostics" />
+            <Refusal
+              diagnostics={rendered.data.diagnostics}
+              document={caseDocument(form, library)}
+            />
           ) : (
             <TabsRoot
               defaultValue="python"
@@ -641,15 +705,6 @@ function CaseEditor() {
                   ]}
                 />
                 <span className="text-fg-3 text-sm">written by the SDK</span>
-                <CaseActions
-                  name={form.name}
-                  // Only the case shown, once it is the form's: an edit not yet rendered waits.
-                  rendered={
-                    rendered.data?.ok && !rendered.isPlaceholderData && settled === form
-                      ? rendered.data
-                      : null
-                  }
-                />
               </div>
               <TabPanel value="python" className="min-w-0 outline-none">
                 <Code testId="case-py" text={rendered.data?.ok ? rendered.data.python : ""} />
@@ -841,19 +896,80 @@ function PlanSummary({ plan, current }: { plan: Plan; current: boolean }) {
         </span>
       </h2>
       {uncovered.length > 0 && (
-        <p className="m-0 font-mono text-fg-2 text-sm">
-          {uncovered.map((b) => b.zone).join(" · ")}
+        <p className="m-0 text-fg-2 text-sm" data-testid="uncovered">
+          {uncovered.length} {uncovered.length === 1 ? "zone" : "zones"} without a condition:{" "}
+          <span className="font-mono">{uncovered.map((b) => b.zone).join(" · ")}</span>
         </p>
       )}
-      <p className="m-0 text-fg-3 text-sm">
-        Planned against the MeshInfo; the mesh file itself is read when the case runs.
-      </p>
       <Diagnostics
-        // The editor plans without the mesh file by design: W0205 says so of every case.
-        items={plan.diagnostics.filter((d) => !(d.code === "W0205" && d.location?.path === "mesh"))}
+        // The editor plans without the mesh file by design: W0205 says so of every case. E0412,
+        // one per zone without a condition, is the line above.
+        items={plan.diagnostics.filter(
+          (d) => !(d.code === "W0205" && d.location?.path === "mesh") && d.code !== "E0412",
+        )}
         testId="plan-diagnostics"
       />
     </section>
+  );
+}
+
+// What the editor calls a setting, from its path in the case document.
+const LABELS: Record<string, string> = {
+  name: "Name",
+  mesh: "Mesh",
+  "physics.turbulence": "Turbulence",
+  "freestream.mach": "Mach",
+  "freestream.ref_length": "Reference length",
+  freestream: "Reynolds number or pressure",
+};
+const OWNERS = { boundaries: "boundary rule", cell_zones: "cell zone", monitors: "monitor" };
+function label(path: string): string {
+  const known = LABELS[path];
+  if (known) return known;
+  const owned = /^(boundaries|cell_zones|monitors)\[(\d+)\]/.exec(path);
+  const leaf = (path.split(".").pop() ?? path).replaceAll("_", " ");
+  return owned
+    ? `${OWNERS[owned[1] as keyof typeof OWNERS]} ${Number(owned[2]) + 1} ${leaf}`
+    : leaf.charAt(0).toUpperCase() + leaf.slice(1);
+}
+
+// The value at a diagnostic's path in the case document; unset when absent or empty.
+function isSet(document: CaseDocument, path: string): boolean {
+  let value: unknown = document;
+  for (const part of path.split(/\.|\[(\d+)\]/).filter(Boolean)) {
+    value =
+      value !== null && typeof value === "object"
+        ? (value as Record<string, unknown>)[part]
+        : undefined;
+  }
+  if (value === undefined || value === "") return false;
+  return typeof value !== "object" || value === null || Object.keys(value).length > 0;
+}
+
+/** Why the SDK refuses the case: the settings still to fill in, in a line, and the problems
+ * with what was set, each with its code. Nothing alarming before anything was typed. */
+function Refusal({ diagnostics, document }: { diagnostics: Diagnostic[]; document: CaseDocument }) {
+  // A setting not given yet is to be set, not an error; "freestream" is the choice of
+  // Reynolds number or pressure, pending while neither is given.
+  const pending = (d: Diagnostic) => {
+    const path = d.location?.path;
+    if (path === undefined) return false;
+    if (path === "freestream")
+      return !isSet(document, "freestream.re") && !isSet(document, "freestream.pressure");
+    return !isSet(document, path);
+  };
+  const missing = [
+    ...new Set(diagnostics.filter(pending).map((d) => label(d.location?.path ?? ""))),
+  ];
+  return (
+    <div className="flex flex-col gap-2">
+      {missing.length > 0 && (
+        <p className="m-0 text-fg-2 text-sm" data-testid="still-to-set">
+          Still to set: {missing.join(" · ")}
+        </p>
+      )}
+      <Diagnostics items={diagnostics.filter((d) => !pending(d))} testId="diagnostics" />
+    </div>
   );
 }
 

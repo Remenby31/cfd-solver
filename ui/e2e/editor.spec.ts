@@ -216,6 +216,7 @@ test("the heat exchanger built in the editor writes py/examples/heat_exchanger.p
   await page.getByLabel("Turbulence").selectOption("sst");
   await page.getByLabel("Mach").fill("0.1");
   await page.getByLabel("Temperature", { exact: true }).fill("300.0");
+  await page.getByLabel("Given by").selectOption("pressure");
   await page.getByLabel("Pressure", { exact: true }).fill("101325.0");
   await cellZone(page, 1, "co2", "fluid", "CO2");
   await cellZone(page, 2, "plate", "solid", "COPPER");
@@ -395,8 +396,10 @@ test("the plan sits below the code, and its status counts its errors", async ({ 
 
   const plan = page.getByTestId("plan");
   await expect(page.getByTestId("plan-status")).toContainText("refused");
-  const errors = await page.getByTestId("plan-diagnostics").getByRole("alert").count();
-  await expect(page.getByTestId("plan-status")).toHaveText(`refused: ${errors} errors`);
+  // One error per note, and one per zone on the line of zones without a condition (E0412).
+  const notes = await page.getByTestId("plan-diagnostics").getByRole("alert").count();
+  const uncovered = Number((await page.getByTestId("uncovered").textContent())?.split(" ")[0]);
+  await expect(page.getByTestId("plan-status")).toHaveText(`refused: ${notes + uncovered} errors`);
   const code = await page.getByTestId("case-py").boundingBox();
   const status = await plan.boundingBox();
   if (!code || !status) throw new Error("the code or the plan is not laid out");
@@ -448,4 +451,53 @@ test("a mesh without a 3D view lists its zones to pick from", async ({ page }) =
   const rule = page.getByRole("group", { name: "Boundary rule 1" });
   await expect(rule.getByLabel("Zones")).toHaveValue("symmetry");
   await expect(rule.getByLabel("Condition")).toHaveValue("symmetry");
+});
+
+test("a new case asks for what it lacks before showing errors", async ({ page }) => {
+  await page.goto("/cases/new");
+  // Nothing typed yet: what the SDK requires (case-schema.md), not its errors.
+  await expect(page.getByTestId("still-to-set")).toHaveText(
+    "Still to set: Name · Mesh · Turbulence",
+  );
+  await expect(page.getByTestId("diagnostics").getByRole("alert")).toHaveCount(0);
+
+  await page.getByLabel("Name").fill("box");
+  await page.getByLabel("Mesh", { exact: true }).selectOption("hybrid-cgns");
+  await page.getByLabel("Turbulence").selectOption("sa");
+  await page.getByLabel("Mach").fill("0.3");
+  await expect(page.getByTestId("still-to-set")).toHaveText(
+    "Still to set: Reynolds number or pressure",
+  );
+  // A value set and refused is an error at once.
+  await page.getByLabel("Mach").fill("-0.3");
+  await expect(page.getByTestId("diagnostics")).toContainText("freestream.mach");
+  await page.getByLabel("Mach").fill("0.3");
+
+  // A Reynolds number needs its reference length (E0306): still to set, not an error.
+  await page.getByLabel("Reynolds number", { exact: true }).fill("1000000");
+  await expect(page.getByTestId("still-to-set")).toHaveText("Still to set: Reference length");
+  await expect(page.getByTestId("diagnostics").getByRole("alert")).toHaveCount(0);
+  await page.getByLabel("Reference length", { exact: true }).fill("1");
+  // Inviscid with a Reynolds number already given: the choice stays, to give a pressure.
+  await page.getByLabel("Turbulence").selectOption("inviscid");
+  await expect(page.getByLabel("Given by")).toBeVisible();
+  await page.getByLabel("Turbulence").selectOption("sa");
+  // One of Reynolds number and pressure (E0306): choosing one clears the other; the reference
+  // length stays, the moments need it.
+  await page.getByLabel("Given by").selectOption("pressure");
+  await expect(page.getByLabel("Reference length", { exact: true })).toHaveValue("1");
+  await expect(page.getByLabel("Reynolds number", { exact: true })).toHaveCount(0);
+  await page.getByLabel("Pressure", { exact: true }).fill("101325");
+  await expect(page.getByTestId("case-py")).toContainText("pressure=101325");
+  expect(await page.getByTestId("case-py").textContent()).not.toMatch(/\bre=/);
+  // An inviscid flow has no Reynolds number to give.
+  await page.getByLabel("Turbulence").selectOption("inviscid");
+  await expect(page.getByLabel("Given by")).toHaveCount(0);
+
+  // Zones without a condition are one line, not one error each.
+  await expect(page.getByTestId("uncovered")).toContainText("6 zones without a condition");
+  await expect(page.getByRole("status").filter({ hasText: "without a condition" })).toHaveText(
+    "6 zones without a condition.",
+  );
+  await expect(page.getByTestId("plan-diagnostics")).not.toContainText("E0412");
 });
