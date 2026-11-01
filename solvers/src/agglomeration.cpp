@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <set>
 #include <stdexcept>
@@ -25,10 +26,13 @@ struct Graph {
   std::vector<index_t> node_edges;
   std::vector<index_t> zone;
   std::vector<std::vector<index_t>> boundary;  // sorted boundary zones touched
-  std::vector<Normal> normal;                  // sum of the boundary faces' area vectors
+  // Per boundary zone touched (the order of `boundary`), the sum of its faces' area vectors and
+  // of their magnitudes.
+  std::vector<std::vector<Normal>> zone_normal;
+  std::vector<std::vector<double>> zone_area;
   std::vector<Normal> centroid;
   std::vector<double> volume;
-  // Level 0: weakest and strongest coupling of each cell through its faces, boundary faces
+  // Level 0: weakest and strongest coupling of each cell through its interior faces (boundary faces
   // included (A_f over twice the distance to the face: the distance to the mirror cell).
   std::vector<double> weakest, strongest;
   std::vector<offset_t> line_offsets{0};
@@ -55,6 +59,21 @@ struct Graph {
     }
   }
 
+  // Each neighbour of a node with the sum of the couplings of the edges joining them, in the
+  // order the neighbours first appear.
+  [[nodiscard]] std::vector<std::pair<std::size_t, double>> couplings(std::size_t node) const {
+    std::vector<std::pair<std::size_t, double>> out;
+    for_edges(node, [&](std::size_t e, std::size_t m) {
+      auto it = std::find_if(out.begin(), out.end(), [&](const auto& p) { return p.first == m; });
+      if (it == out.end()) {
+        out.emplace_back(m, weight[e]);
+      } else {
+        it->second += weight[e];
+      }
+    });
+    return out;
+  }
+
   template <class F>
   void for_edges(std::size_t node, F&& f) const {
     for (auto k = node_offsets[node]; k < node_offsets[node + 1]; ++k) {
@@ -69,13 +88,35 @@ double dot(const Normal& a, const Normal& b) { return a[0] * b[0] + a[1] * b[1] 
 // Whether node b may join an agglomerate seeded by node a: same cell zone, no boundary zone the
 // seed does not touch (so that coarse boundary faces stay on the seed's patches), and boundary
 // faces facing the same side (so that an agglomerate never wraps around a thin wall).
+// Whether nodes a and b may share an agglomerate at all: same cell zone, and no shared boundary
+// zone whose faces face opposite sides in them (a thin wall between them).
+bool joinable(const Graph& g, std::size_t a, std::size_t b);
+
 bool compatible(const Graph& g, std::size_t a, std::size_t b) {
-  if (g.zone[a] != g.zone[b]) return false;
   if (!std::includes(g.boundary[a].begin(), g.boundary[a].end(), g.boundary[b].begin(),
                      g.boundary[b].end())) {
     return false;
   }
-  return g.boundary[a].empty() || g.boundary[b].empty() || dot(g.normal[a], g.normal[b]) > 0.0;
+  return joinable(g, a, b);
+}
+
+bool joinable(const Graph& g, std::size_t a, std::size_t b) {
+  if (g.zone[a] != g.zone[b]) return false;
+  // Per zone, and only where a zone's faces face one side in both nodes: the two side planes of
+  // a one-cell-thick mesh, in one zone or two, cancel out and give no direction.
+  auto directed = [&](std::size_t c, std::size_t j) {
+    const Normal& n = g.zone_normal[c][j];
+    return std::sqrt(dot(n, n)) > 0.5 * g.zone_area[c][j];
+  };
+  for (std::size_t j = 0; j < g.boundary[b].size(); ++j) {
+    const auto it = std::lower_bound(g.boundary[a].begin(), g.boundary[a].end(), g.boundary[b][j]);
+    if (it == g.boundary[a].end() || *it != g.boundary[b][j]) continue;
+    const auto i = static_cast<std::size_t>(it - g.boundary[a].begin());
+    if (directed(a, i) && directed(b, j) && dot(g.zone_normal[a][i], g.zone_normal[b][j]) <= 0.0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 Graph fine_graph(const Mesh& mesh, const Geometry& geometry) {
@@ -101,36 +142,59 @@ Graph fine_graph(const Mesh& mesh, const Geometry& geometry) {
     g.centroid[c] = {gm.cell_centroid_x[c], gm.cell_centroid_y[c], gm.cell_centroid_z[c]};
   }
   g.boundary.assign(g.n, {});
-  g.normal.assign(g.n, Normal{0.0, 0.0, 0.0});
+  g.zone_normal.assign(g.n, {});
+  g.zone_area.assign(g.n, {});
   const auto nf = static_cast<std::size_t>(mesh.n_faces());
+  struct Sum {
+    Normal normal{};
+    double area = 0.0;
+  };
+  std::vector<std::vector<std::pair<index_t, Sum>>> per_zone(g.n);
   for (std::size_t f = ni; f < nf; ++f) {
     const auto c = static_cast<std::size_t>(mesh.owner()[f]);
-    auto& zones = g.boundary[c];
     const index_t z = mesh.face_zone()[f];
-    if (std::find(zones.begin(), zones.end(), z) == zones.end()) zones.push_back(z);
-    g.normal[c][0] += gm.face_area_x[f];
-    g.normal[c][1] += gm.face_area_y[f];
-    g.normal[c][2] += gm.face_area_z[f];
+    auto it = std::find_if(per_zone[c].begin(), per_zone[c].end(),
+                           [&](const auto& p) { return p.first == z; });
+    if (it == per_zone[c].end()) it = per_zone[c].insert(per_zone[c].end(), {z, Sum{}});
+    it->second.normal[0] += gm.face_area_x[f];
+    it->second.normal[1] += gm.face_area_y[f];
+    it->second.normal[2] += gm.face_area_z[f];
+    it->second.area += gm.face_area[f];
   }
-  for (auto& zones : g.boundary) std::sort(zones.begin(), zones.end());
+  for (std::size_t c = 0; c < g.n; ++c) {
+    std::sort(per_zone[c].begin(), per_zone[c].end(),
+              [](const auto& x, const auto& y) { return x.first < y.first; });
+    for (const auto& [z, sum] : per_zone[c]) {
+      g.boundary[c].push_back(z);
+      g.zone_normal[c].push_back(sum.normal);
+      g.zone_area[c].push_back(sum.area);
+    }
+  }
+  g.build_adjacency();
+  // Weakest and strongest coupling of each cell to its neighbours, the faces it shares with one
+  // neighbour summed. Boundary faces join in only for a cell with at most two neighbours, whose
+  // anisotropy they alone show (a column of cells); they couple no unknowns, and the side planes
+  // of a one-cell-thick mesh, far weaker than any neighbour, would make every cell anisotropic.
   g.weakest.assign(g.n, std::numeric_limits<double>::infinity());
   g.strongest.assign(g.n, 0.0);
-  auto couple = [&](std::size_t c, double w) {
-    g.weakest[c] = std::min(g.weakest[c], w);
-    g.strongest[c] = std::max(g.strongest[c], w);
-  };
-  for (std::size_t f = 0; f < ni; ++f) {
-    couple(static_cast<std::size_t>(g.owner[f]), g.weight[f]);
-    couple(static_cast<std::size_t>(g.neighbour[f]), g.weight[f]);
+  std::vector<std::size_t> neighbours(g.n, 0);
+  for (std::size_t c = 0; c < g.n; ++c) {
+    for (const auto& [m, w] : g.couplings(c)) {
+      g.weakest[c] = std::min(g.weakest[c], w);
+      g.strongest[c] = std::max(g.strongest[c], w);
+      ++neighbours[c];
+    }
   }
   for (std::size_t f = ni; f < nf; ++f) {
     const auto c = static_cast<std::size_t>(mesh.owner()[f]);
+    if (neighbours[c] > 2) continue;
     const double dx = gm.face_centroid_x[f] - gm.cell_centroid_x[c];
     const double dy = gm.face_centroid_y[f] - gm.cell_centroid_y[c];
     const double dz = gm.face_centroid_z[f] - gm.cell_centroid_z[c];
-    couple(c, gm.face_area[f] / (2.0 * std::sqrt(dx * dx + dy * dy + dz * dz)));
+    const double w = gm.face_area[f] / (2.0 * std::sqrt(dx * dx + dy * dy + dz * dz));
+    g.weakest[c] = std::min(g.weakest[c], w);
+    g.strongest[c] = std::max(g.strongest[c], w);
   }
-  g.build_adjacency();
   return g;
 }
 
@@ -156,15 +220,14 @@ void make_lines(Graph& g, double ratio) {
     for (;;) {
       std::size_t best = g.n;
       double best_w = 0.0;
-      g.for_edges(cur, [&](std::size_t e, std::size_t m) {
-        if (in_line[m] != 0 || g.zone[m] != g.zone[cur]) return;
-        const double w = g.weight[e];
-        if (w < ratio * weakest[cur] || w < ratio * weakest[m]) return;
+      for (const auto& [m, w] : g.couplings(cur)) {
+        if (in_line[m] != 0 || g.zone[m] != g.zone[cur]) continue;
+        if (w < ratio * weakest[cur] || w < ratio * weakest[m]) continue;
         if (w > best_w || (w == best_w && m < best)) {
           best_w = w;
           best = m;
         }
-      });
+      }
       if (best == g.n) return;
       in_line[best] = 1;
       out.push_back(static_cast<index_t>(best));
@@ -233,15 +296,20 @@ Graph coarsen(const Graph& g, const AgglomerationOptions& opt, Level& level) {
 
   // Lines with their neighbouring lines, layer by layer: a group grows from a seed line by the
   // free line touching the most lines of the group, at the most layers, the nearest among equals
-  // (a 2 x 2 block of wall lines). A line may run the other way than its neighbours: its layers
-  // are matched in the orientation that touches the group at more layers.
+  // (a 2 x 2 block of wall lines). A neighbouring line may run the other way and start at another
+  // layer (lines that do not start on a wall): its layers are matched to the seed's in the
+  // orientation and shift that pair the most adjacent nodes.
   std::vector<int> grouped(n_lines, 0);
   struct Member {
     std::size_t line;
     bool reversed;
+    std::ptrdiff_t shift;  // index along the line of the seed's layer k: k + shift
   };
   auto layer_node = [&](const Member& m, std::size_t k) {
-    return line_node(m.line, m.reversed ? line_size(m.line) - 1 - k : k);
+    const std::ptrdiff_t j = static_cast<std::ptrdiff_t>(k) + m.shift;
+    const auto size = static_cast<std::ptrdiff_t>(line_size(m.line));
+    if (j < 0 || j >= size) return none;
+    return line_node(m.line, static_cast<std::size_t>(m.reversed ? size - 1 - j : j));
   };
   auto separation = [&](std::size_t a, std::size_t b) {
     double d = 0.0;
@@ -249,73 +317,146 @@ Graph coarsen(const Graph& g, const AgglomerationOptions& opt, Level& level) {
       d += (g.centroid[a][i] - g.centroid[b][i]) * (g.centroid[a][i] - g.centroid[b][i]);
     return d;
   };
+  // Semi-coarsening along a run of consecutive line nodes, two per coarse node (Mavriplis and
+  // Pirzadeh 1999, J. Aircraft 36(6):987-998): the coarse nodes form a coarse line.
+  auto pair_along = [&](const std::vector<std::size_t>& run) {
+    std::vector<std::size_t> coarse_line;
+    bool open = false;  // the last coarse node holds one node
+    for (std::size_t k = 0; k < run.size(); ++k) {
+      if (open && compatible(g, run[k - 1], run[k])) {
+        members[coarse_line.back()].push_back(static_cast<index_t>(run[k]));
+        agg[run[k]] = coarse_line.back();
+        open = false;
+        continue;
+      }
+      agg[run[k]] = members.size();
+      coarse_line.push_back(members.size());
+      members.push_back({static_cast<index_t>(run[k])});
+      open = true;
+    }
+    clines.push_back(std::move(coarse_line));
+  };
   for (std::size_t s = 0; s < n_lines; ++s) {
     if (line_size(s) < opt.min_line || grouped[s] != 0) continue;
     grouped[s] = 1;
-    std::vector<Member> group{{s, false}};
+    std::vector<Member> group{{s, false, 0}};
     while (group.size() < opt.max_lines) {
       struct Candidate {
-        std::size_t line, touched = 0, forward = 0, backward = 0;
+        std::size_t line, touched = 0;
+        std::map<std::pair<int, std::ptrdiff_t>, std::size_t> votes;  // (reversed, shift)
       };
       std::vector<Candidate> candidates;
       for (const Member& member : group) {
         std::vector<std::size_t> seen;  // candidate lines this member touches
-        for (std::size_t k = 0; k < line_size(member.line); ++k) {
-          g.for_edges(layer_node(member, k), [&](std::size_t, std::size_t m) {
+        for (std::size_t k = 0; k < line_size(s); ++k) {
+          const std::size_t a = layer_node(member, k);
+          if (a == none) continue;
+          // One vote per neighbouring cell, however many faces they share.
+          for (const auto& [m, w] : g.couplings(a)) {
             const std::size_t l = line_of[m];
-            if (grouped[l] != 0 || line_size(l) < opt.min_line) return;
-            const bool fwd = position[m] == k, bwd = line_size(l) - 1 - position[m] == k;
-            if (!fwd && !bwd) return;
+            if (grouped[l] != 0 || line_size(l) < opt.min_line) continue;
+            // Only a layer the seed line's node there would accept counts (else the line would
+            // join the group at no layer and keep the seed line from coarsening along itself).
+            if (!compatible(g, line_node(s, k), m)) continue;
             auto it = std::find_if(candidates.begin(), candidates.end(),
                                    [&](const Candidate& c) { return c.line == l; });
-            if (it == candidates.end()) it = candidates.insert(candidates.end(), Candidate{l});
-            it->forward += fwd ? 1 : 0;
-            it->backward += bwd ? 1 : 0;
+            if (it == candidates.end())
+              it = candidates.insert(candidates.end(), Candidate{l, 0, {}});
+            const auto p = static_cast<std::ptrdiff_t>(position[m]);
+            const auto last = static_cast<std::ptrdiff_t>(line_size(l)) - 1;
+            const auto kk = static_cast<std::ptrdiff_t>(k);
+            for (const auto& key : {std::pair<int, std::ptrdiff_t>{0, p - kk},
+                                    std::pair<int, std::ptrdiff_t>{1, last - p - kk}}) {
+              ++it->votes[key];
+            }
             if (std::find(seen.begin(), seen.end(), l) == seen.end()) {
               seen.push_back(l);
               ++it->touched;
             }
-          });
+          }
         }
       }
       if (candidates.empty()) break;
+      // The orientation and shift of a candidate: the most layers, then forward, then the
+      // smallest shift.
+      auto hypothesis = [](const Candidate& c) {
+        return *std::min_element(c.votes.begin(), c.votes.end(), [](const auto& x, const auto& y) {
+          if (x.second != y.second) return x.second > y.second;
+          if (x.first.first != y.first.first) return x.first.first < y.first.first;
+          const auto ax = x.first.second < 0 ? -x.first.second : x.first.second;
+          const auto ay = y.first.second < 0 ? -y.first.second : y.first.second;
+          return ax != ay ? ax < ay : x.first.second < y.first.second;
+        });
+      };
       const std::size_t origin = line_node(s, 0);
       const auto best = std::min_element(
           candidates.begin(), candidates.end(), [&](const Candidate& x, const Candidate& y) {
             if (x.touched != y.touched) return x.touched > y.touched;
-            const std::size_t lx = std::max(x.forward, x.backward),
-                              ly = std::max(y.forward, y.backward);
+            const std::size_t lx = hypothesis(x).second, ly = hypothesis(y).second;
             if (lx != ly) return lx > ly;
             const double dx = separation(line_node(x.line, 0), origin);
             const double dy = separation(line_node(y.line, 0), origin);
             return dx != dy ? dx < dy : x.line < y.line;
           });
       grouped[best->line] = 1;
-      group.push_back({best->line, best->backward > best->forward});
+      const auto h = hypothesis(*best);
+      group.push_back({best->line, h.first.first == 1, h.first.second});
     }
-    std::vector<std::size_t> coarse_line;
+    if (group.size() == 1) {
+      // No free neighbouring line: the line coarsens along itself, so that coarse levels keep
+      // shrinking once the wall plane is exhausted.
+      std::vector<std::size_t> run;
+      for (std::size_t k = 0; k < line_size(s); ++k) run.push_back(line_node(s, k));
+      pair_along(run);
+      continue;
+    }
+    // Each of the seed's layers with the member nodes adjacent to it; a layer no member joined
+    // pairs with the next such layer along the seed line, so that a group touching the seed at a
+    // few layers still coarsens it.
+    constexpr std::size_t pending = none - 1;
+    std::vector<std::vector<std::size_t>> layers(line_size(s));
     std::vector<std::size_t> joined(group.size(), 0);
     for (std::size_t k = 0; k < line_size(s); ++k) {
       const std::size_t seed = line_node(s, k);
-      const std::size_t c = members.size();
-      members.push_back({static_cast<index_t>(seed)});
-      agg[seed] = c;
+      layers[k].push_back(seed);
+      agg[seed] = pending;
       for (std::size_t i = 1; i < group.size(); ++i) {
-        if (k >= line_size(group[i].line)) continue;
         const std::size_t m = layer_node(group[i], k);
+        if (m == none || agg[m] != none) continue;
         bool adjacent = false;
-        g.for_edges(m, [&](std::size_t, std::size_t o) { adjacent = adjacent || agg[o] == c; });
+        g.for_edges(m, [&](std::size_t, std::size_t o) {
+          adjacent =
+              adjacent || std::find(layers[k].begin(), layers[k].end(), o) != layers[k].end();
+        });
         if (adjacent && compatible(g, seed, m)) {
-          members[c].push_back(static_cast<index_t>(m));
-          agg[m] = c;
+          layers[k].push_back(m);
+          agg[m] = pending;
           ++joined[i];
         }
       }
+    }
+    std::vector<std::size_t> coarse_line;
+    bool open = false;  // the last coarse node holds one unjoined seed layer
+    for (std::size_t k = 0; k < line_size(s); ++k) {
+      const std::size_t seed = layers[k][0];
+      if (layers[k].size() == 1 && open && compatible(g, layers[k - 1][0], seed)) {
+        members[coarse_line.back()].push_back(static_cast<index_t>(seed));
+        agg[seed] = coarse_line.back();
+        open = false;
+        continue;
+      }
+      const std::size_t c = members.size();
+      members.emplace_back();
+      for (const std::size_t m : layers[k]) {
+        members[c].push_back(static_cast<index_t>(m));
+        agg[m] = c;
+      }
       coarse_line.push_back(c);
+      open = layers[k].size() == 1;
     }
     clines.push_back(std::move(coarse_line));
-    // A line that joined at some layer keeps its other nodes as coarse nodes of their own, in
-    // runs that remain lines; a line that joined nowhere is free again for another group.
+    // A line that joined at some layer coarsens the rest of its nodes along itself, in runs that
+    // remain lines; a line that joined nowhere is free again for another group.
     for (std::size_t i = 1; i < group.size(); ++i) {
       const std::size_t l = group[i].line;
       if (joined[i] == 0) {
@@ -325,12 +466,9 @@ Graph coarsen(const Graph& g, const AgglomerationOptions& opt, Level& level) {
       std::vector<std::size_t> run;
       for (std::size_t k = 0; k <= line_size(l); ++k) {
         if (k < line_size(l) && agg[line_node(l, k)] == none) {
-          const std::size_t c = members.size();
-          members.push_back({static_cast<index_t>(line_node(l, k))});
-          agg[line_node(l, k)] = c;
-          run.push_back(c);
+          run.push_back(line_node(l, k));
         } else if (!run.empty()) {
-          clines.push_back(std::move(run));
+          pair_along(run);
           run.clear();
         }
       }
@@ -367,9 +505,20 @@ Graph coarsen(const Graph& g, const AgglomerationOptions& opt, Level& level) {
     // seed among equals: compact agglomerates (2 x 2 x 2 blocks of hexahedra). A node brings the
     // other nodes of its short line, so that a strong coupling never joins two agglomerates.
     std::vector<std::pair<std::size_t, int>> inside;  // candidate, faces on the agglomerate
+    // A node brings its whole short line: the node must suit the seed, and every node of its line
+    // be joinable (same cell zone, no thin wall between); the seed's patches are not imposed on
+    // the rest of the line, a quality rule that would split strongly coupled pairs.
+    auto line_compatible = [&](std::size_t a, std::size_t m) {
+      if (!compatible(g, a, m)) return false;
+      const std::size_t l = line_of[m];
+      for (std::size_t k = 0; k < line_size(l); ++k) {
+        if (!joinable(g, a, line_node(l, k))) return false;
+      }
+      return true;
+    };
     auto admit = [&](std::size_t node) {
       g.for_edges(node, [&](std::size_t, std::size_t m) {
-        if (agg[m] != none || !is_point(m) || !compatible(g, seed, m)) return;
+        if (agg[m] != none || !is_point(m) || !line_compatible(seed, m)) return;
         auto it =
             std::find_if(inside.begin(), inside.end(), [&](const auto& x) { return x.first == m; });
         if (it == inside.end()) {
@@ -460,7 +609,8 @@ Graph coarsen(const Graph& g, const AgglomerationOptions& opt, Level& level) {
   coarse.n = nc;
   coarse.zone.assign(nc, 0);
   coarse.boundary.assign(nc, {});
-  coarse.normal.assign(nc, Normal{0.0, 0.0, 0.0});
+  coarse.zone_normal.assign(nc, {});
+  coarse.zone_area.assign(nc, {});
   coarse.centroid.assign(nc, Normal{0.0, 0.0, 0.0});
   coarse.volume.assign(nc, 0.0);
   level.coarse_node.assign(g.n, 0);
@@ -468,22 +618,29 @@ Graph coarsen(const Graph& g, const AgglomerationOptions& opt, Level& level) {
     if (members[c].empty()) continue;
     const std::size_t C = renumber[c];
     coarse.zone[C] = g.zone[static_cast<std::size_t>(members[c][0])];
-    std::vector<index_t> zones;
+    std::vector<std::pair<index_t, std::pair<Normal, double>>> zones;  // sorted by zone
     for (const index_t f : members[c]) {
       const auto fu = static_cast<std::size_t>(f);
       level.coarse_node[fu] = static_cast<index_t>(C);
-      std::vector<index_t> merged;
-      std::set_union(zones.begin(), zones.end(), g.boundary[fu].begin(), g.boundary[fu].end(),
-                     std::back_inserter(merged));
-      zones = std::move(merged);
+      for (std::size_t j = 0; j < g.boundary[fu].size(); ++j) {
+        const index_t z = g.boundary[fu][j];
+        auto it = std::lower_bound(zones.begin(), zones.end(), z,
+                                   [](const auto& p, index_t v) { return p.first < v; });
+        if (it == zones.end() || it->first != z) it = zones.insert(it, {z, {Normal{}, 0.0}});
+        for (std::size_t d = 0; d < 3; ++d) it->second.first[d] += g.zone_normal[fu][j][d];
+        it->second.second += g.zone_area[fu][j];
+      }
       coarse.volume[C] += g.volume[fu];
       for (std::size_t d = 0; d < 3; ++d) {
-        coarse.normal[C][d] += g.normal[fu][d];
         coarse.centroid[C][d] += g.volume[fu] * g.centroid[fu][d];
       }
     }
     for (std::size_t d = 0; d < 3; ++d) coarse.centroid[C][d] /= coarse.volume[C];
-    coarse.boundary[C] = std::move(zones);
+    for (const auto& [z, sum] : zones) {
+      coarse.boundary[C].push_back(z);
+      coarse.zone_normal[C].push_back(sum.first);
+      coarse.zone_area[C].push_back(sum.second);
+    }
   }
   for (const auto& line : clines) {
     for (const std::size_t c : line) coarse.line_nodes.push_back(static_cast<index_t>(renumber[c]));
