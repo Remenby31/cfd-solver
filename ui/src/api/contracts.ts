@@ -98,7 +98,8 @@ export interface RunRegistry {
 }
 
 export interface RunSummary {
-  iteration: number;
+  /** Null until the history records an iteration; run.json's count holds then. */
+  iteration: number | null;
   /** Orders of magnitude the slowest residual has dropped since iteration 1. */
   orders: number | null;
   /** `orders` along the run, at most 48 points. */

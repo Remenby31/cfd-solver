@@ -6,6 +6,13 @@ import { study } from "./index";
 test("angles are read in degrees from the case's units", () => {
   expect(degrees("19.57 deg")).toBe(19.57);
   expect(degrees(`${Math.PI / 2} rad`)).toBeCloseTo(90);
+  expect(degrees("100 mrad")).toBeCloseTo(5.729578);
+  expect(degrees("15 arcmin")).toBe(0.25);
+  expect(degrees("0.5 turn")).toBe(180);
+  expect(degrees("10.0 grad")).toBe(9);
+  expect(degrees("100000.0 μrad")).toBeCloseTo(5.729578);
+  expect(degrees("19.57 m")).toBeNull();
+  expect(degrees("3 constructor")).toBeNull();
   expect(degrees("19.57")).toBeNull();
   expect(degrees(null)).toBeNull();
 });

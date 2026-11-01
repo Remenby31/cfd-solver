@@ -75,6 +75,12 @@ const say = (key: string, value: string) => NAMES[key]?.(value) ?? `${key} ${val
  * there are none. */
 function ended(run: Run): { name: string; cl: number; cd: number } | string {
   if (run.status !== "converged") return `${run.status}, not converged`;
+  return finalCoefficients(run);
+}
+
+/** The CL and CD of an ended run's one forces monitor giving them, on its final state
+ * (results.md#runjson monitors), with that monitor's name; otherwise why there are none. */
+export function finalCoefficients(run: Run): { name: string; cl: number; cd: number } | string {
   const coefficients = Object.entries(run.monitors ?? {}).filter(
     ([, m]) => m.cl !== undefined && m.cd !== undefined,
   );

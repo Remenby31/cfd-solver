@@ -32,6 +32,37 @@ test("home lists every run directory and filters by state", async ({ page }) => 
   await expect(rows.first()).toContainText("D0107");
 });
 
+test("each run in the list shows its Mach, angle and final coefficients", async ({ page }) => {
+  // The crm-hl sweep of scripts/sample-runs.sh: M 0.2 at four angles, from its case files.
+  const registry = await (await page.request.get("/api/runs")).json();
+  const sweep: Run[] = registry.runs.filter(
+    (r: Run) =>
+      r.status === "converged" && registry.summaries[r.run_id]?.settings?.aoa === "11.29 deg",
+  );
+  expect(sweep.length).toBeGreaterThan(0);
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.goto("/");
+  // At 1024 px every row fits its frame: nothing scrolls sideways, nothing overlaps.
+  const first = page.locator("a[data-row]").first();
+  await expect(first).toBeVisible();
+  expect(await first.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  // A diverged run's diagnostic code shows whole beside its state.
+  const diverged = (registry.runs as Run[]).find((r) => r.status === "diverged") as Run;
+  const code = page
+    .locator(`a[data-run="${diverged.run_id}"]`)
+    .getByText(diverged.diagnostics[0]?.code ?? "", { exact: true });
+  await expect(code).toBeVisible();
+  expect(await code.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  for (const run of sweep) {
+    const row = page.locator(`a[data-run="${run.run_id}"]`);
+    await expect(row.getByTestId("mach")).toHaveText("0.2");
+    await expect(row.getByTestId("alpha")).toHaveText("11.29°");
+    const forces = run.monitors?.forces;
+    await expect(row.getByTestId("cl")).toHaveText((forces?.cl ?? Number.NaN).toFixed(4));
+    await expect(row.getByTestId("cd")).toHaveText((forces?.cd ?? Number.NaN).toFixed(4));
+  }
+});
+
 test("a run written by another process appears and updates live", async ({ page }) => {
   await page.goto("/");
   const rows = page.locator("a[data-row]");

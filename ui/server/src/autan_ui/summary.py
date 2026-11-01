@@ -125,8 +125,8 @@ class Summaries:
             if orders is not None:
                 trend.orders.append(orders)
         trend.offset = chunk.offset
-        if trend.iteration is None:
-            return None
+        # A run with no recorded iteration yet still has a summary, its settings come with it;
+        # its iteration is then run.json's (a continuation may not have written one yet).
         return {
             "iteration": trend.iteration,
             "orders": None if trend.current is None else round(trend.current, 3),

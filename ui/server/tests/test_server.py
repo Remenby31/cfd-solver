@@ -123,6 +123,18 @@ def test_the_registry_lists_the_runs_whose_solution_is_a_result(runs: Path) -> N
     assert Registry(runs).scan().solutions == [early.name]
 
 
+def test_a_run_without_history_has_a_summary_with_its_settings(runs: Path) -> None:
+    # py/examples/crm_hl.py: M 0.2, 19.57 deg; no iteration recorded yet.
+    case = autan.load(PY / "examples" / "crm_hl.py")
+    mesh_info = autan.MeshInfo.load(PY / "tests" / "fixtures" / "crm-hl.meshinfo.json")
+    early = case.run(mesh_info, backend=autan.FakeBackend(iterations=0), runs=runs).path
+
+    summary = Registry(runs).scan().summaries[early.name]
+
+    assert (summary["iteration"], summary["trend"]) == (None, [])
+    assert (summary["settings"]["mach"], summary["settings"]["aoa"]) == (0.2, "19.57 deg")
+
+
 def test_registry_rechecks_a_run_when_any_contract_file_changes(runs: Path) -> None:
     source = next(runs.iterdir())
     registry = Registry(runs)

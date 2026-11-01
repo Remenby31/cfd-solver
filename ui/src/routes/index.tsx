@@ -17,9 +17,9 @@ import {
   type RunStatus,
   type RunSummary,
 } from "../api/contracts";
-import { devicesLabel } from "../api/devices";
+import { finalCoefficients } from "../api/polars";
 import { runsQuery } from "../api/runs";
-import { degrees } from "../api/units";
+import { coefficient, degrees } from "../api/units";
 import { Peek } from "../components/runs/Peek";
 import { SelectionBar } from "../components/runs/SelectionBar";
 import { SelectionContext, useSelection } from "../components/runs/selection";
@@ -80,7 +80,7 @@ function matches(run: Run, search: Search): boolean {
 }
 
 const COLUMNS =
-  "grid grid-cols-[minmax(180px,1.4fr)_minmax(140px,1fr)_minmax(150px,1fr)_88px_minmax(130px,1fr)_100px_40px] items-center gap-4";
+  "grid grid-cols-[minmax(140px,1.4fr)_minmax(140px,1fr)_40px_56px_64px_64px_minmax(100px,1fr)_64px_88px_40px] items-center gap-4";
 
 function Runs() {
   const search = Route.useSearch();
@@ -266,9 +266,12 @@ function Runs() {
                   >
                     <span>{grouped && !filtered ? "Run" : "Case"}</span>
                     <span>State</span>
-                    <span>Residuals</span>
+                    <span className="text-right">M</span>
+                    <span className="text-right">α</span>
+                    <span className="text-right">CL</span>
+                    <span className="text-right">CD</span>
+                    <span>Drop (orders)</span>
                     <span className="text-right">Iteration</span>
-                    <span>Devices</span>
                     <span className="text-right">Started</span>
                     <span />
                   </div>
@@ -377,7 +380,9 @@ function Group({
             )}
           />
           <span className="font-medium">{name}</span>
-          <span className="text-fg-3">{runs.length} runs</span>
+          <span className="text-fg-3">
+            {runs.length} {runs.length === 1 ? "run" : "runs"}
+          </span>
           {sweep && (
             <span className="flex min-w-0 items-center gap-2" data-testid="study">
               <Badge tone="purple">study</Badge>
@@ -472,6 +477,10 @@ function RunRow({
   useTicker(run.status === "running");
   const iteration = summary?.iteration ?? run.iterations;
   const target = summary?.target_orders ?? undefined;
+  const alpha = degrees(summary?.settings?.aoa);
+  const shownAlpha = alpha === null ? "" : String(Number(alpha.toFixed(2)));
+  // The final coefficients once the run has ended (results.md#runjson); greyed unless converged.
+  const coefficients = run.status === "running" ? "still running" : finalCoefficients(run);
   return (
     <motion.li
       data-run-row
@@ -498,13 +507,68 @@ function RunRow({
           <span className={cn("truncate font-mono", grouped ? "text-fg" : "text-fg-3 text-sm")}>
             {run.run_id.slice(-8)}
           </span>
-        </span>
-        <span className="flex min-w-0 items-center gap-2">
-          <Status status={run.status} duration={duration(run)} />
-          {run.diagnostics[0] && (
-            <span className="font-mono text-danger text-xs">{run.diagnostics[0].code}</span>
+          {run.solver.backend === "fake" && (
+            <Tooltip content="Synthetic results from the fake backend">
+              <span className="rounded-xs bg-warning-soft px-1 text-warning text-xs">fake</span>
+            </Tooltip>
           )}
         </span>
+        <span className="flex min-w-0 items-center gap-2">
+          {/* The status shrinks first: the diagnostic's code always shows whole. */}
+          <span className="min-w-0 overflow-hidden whitespace-nowrap">
+            <Status status={run.status} duration={duration(run)} />
+          </span>
+          {run.diagnostics[0] && (
+            <span className="flex-none font-mono text-danger text-xs">
+              {run.diagnostics[0].code}
+            </span>
+          )}
+        </span>
+        <span className="text-right font-mono text-sm tabular-nums">
+          <span className="sr-only">Mach </span>
+          <span data-testid="mach">
+            {summary?.settings?.mach == null
+              ? "—"
+              : String(Number(summary.settings.mach.toPrecision(3)))}
+          </span>
+        </span>
+        <span className="text-right font-mono text-sm tabular-nums">
+          <span className="sr-only">angle of attack </span>
+          <span data-testid="alpha">{alpha === null ? "—" : `${shownAlpha}°`}</span>
+        </span>
+        {typeof coefficients === "string" ? (
+          <>
+            <span className="text-right text-fg-3">
+              —<span className="sr-only"> CL: {coefficients}</span>
+            </span>
+            <span className="text-right text-fg-3">
+              —<span className="sr-only"> CD: {coefficients}</span>
+            </span>
+          </>
+        ) : (
+          <>
+            <span
+              className={cn(
+                "text-right font-mono text-sm tabular-nums",
+                run.status !== "converged" && "text-fg-3",
+              )}
+            >
+              <span className="sr-only">CL </span>
+              <span data-testid="cl">{coefficient(coefficients.cl)}</span>
+              {run.status !== "converged" && <span className="sr-only">, not converged</span>}
+            </span>
+            <span
+              className={cn(
+                "text-right font-mono text-sm tabular-nums",
+                run.status !== "converged" && "text-fg-3",
+              )}
+            >
+              <span className="sr-only">CD </span>
+              <span data-testid="cd">{coefficient(coefficients.cd)}</span>
+              {run.status !== "converged" && <span className="sr-only">, not converged</span>}
+            </span>
+          </>
+        )}
         <span className="flex items-center gap-2">
           <Sparkline
             values={summary?.trend ?? []}
@@ -527,16 +591,6 @@ function RunRow({
         </span>
         <span className="text-right font-mono tabular-nums" data-testid="iterations">
           {iteration.toLocaleString("en")}
-        </span>
-        <span className="flex min-w-0 items-center gap-1.5 whitespace-nowrap font-mono text-fg-2 text-sm">
-          {devicesLabel(run.devices)}
-          <span className="text-fg-3">·</span>
-          <span className="truncate">{run.precision}</span>
-          {run.solver.backend === "fake" && (
-            <Tooltip content="Synthetic results from the fake backend">
-              <span className="rounded-xs bg-warning-soft px-1 text-warning text-xs">fake</span>
-            </Tooltip>
-          )}
         </span>
         <span className="text-right text-fg-2 text-sm">
           <RelativeTime iso={run.started} card={false} />
