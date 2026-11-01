@@ -37,6 +37,7 @@ prepare() {
   # runs from cron, one instance (flock -n), so it comes back within a minute and after a reboot.
   install -d -m 0755 "$lock_dir/bin" "$HOME/autan-gpu-guard"
   install -m 0755 "$here/../../bench/lock/autan-gpu-lock" "$here/../../bench/lock/autan-gpu-guard" "$lock_dir/bin/"
+  install -m 0644 "$here/../../bench/lock/autan_memfloor.py" "$lock_dir/bin/"
   # A running guard keeps its old code: stop it, and cron starts the new one within a minute.
   pkill -f "^python3 $lock_dir/bin/autan-gpu-guard" || true
   local cron="* * * * * flock -n $HOME/autan-gpu-guard/run.lock $lock_dir/bin/autan-gpu-guard >> $HOME/autan-gpu-guard/guard.log 2>&1"

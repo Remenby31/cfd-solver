@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """autan-campaign: CPU campaigns on a DGX Spark that never disturb a GPU measurement.
 
-    autan-campaign start NAME [--cpus 12] [--image autan-dev:local] [--dir DIR] -- COMMAND...
+    autan-campaign start NAME [--cpus 12] [--free 24G] [--image autan-dev:local] [--dir DIR] -- COMMAND...
     autan-campaign status
     autan-campaign stop NAME
 
@@ -13,7 +13,8 @@ bandwidth a measurement sees. The watcher publishes each campaign's state next t
 (campaigns/NAME.state: "running" before any start or thaw, "frozen" once frozen, and a heartbeat
 touched at every poll), and autan-bench measures only once every live campaign reads frozen. The container stops by itself when the watcher's
 heartbeat is a minute old, so a campaign never outlives its watcher. The watcher removes the
-campaign if more than 6 threads outside every campaign stay runnable for a minute. See docs/infra/bench.md.
+campaign if more than 6 threads outside every campaign stay runnable for a minute, and as soon
+as the host's available memory falls below --free (autan_memfloor.py). See docs/infra/bench.md.
 """
 
 from __future__ import annotations
@@ -24,8 +25,14 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+
+# autan_memfloor sits beside this script once installed, in bench/lock/ in the repository.
+sys.path.append(str(Path(__file__).resolve().parents[1] / "lock"))
+sys.dont_write_bytecode = True
+import autan_memfloor as memfloor
 
 LOCK = Path(os.environ.get("AUTAN_GPU_LOCK", "/home/admin/autan-gpu/gpu.lock"))
 STATES = LOCK.parent / "campaigns"
@@ -163,7 +170,7 @@ def remove(name: str) -> bool:
     return False
 
 
-def watch(name: str) -> int:
+def watch(name: str, floor: int) -> int:
     container = PREFIX + name
     heartbeat = STATES / f"{name}.heartbeat"
     stopping = False
@@ -184,6 +191,24 @@ def watch(name: str) -> int:
         if stopping:
             log(name, "stopped before it started")
             return 0
+        if memfloor.below(floor):
+            log(name, f"{memfloor.show(memfloor.available())} of host memory available, below "
+                      f"--free {memfloor.show(floor)}: not started")  # fmt: skip
+            return 1
+        # Its own thread: the loop below waits on docker calls (up to 30 s each), the floor
+        # cannot. It kills the container at once; the loop then removes it.
+        breached = threading.Event()
+
+        def guard() -> None:
+            while not stopping and not breached.is_set():
+                if memfloor.below(floor):
+                    breached.set()
+                    with contextlib.suppress(subprocess.SubprocessError, OSError):
+                        docker("kill", container, check=False)
+                    return
+                time.sleep(POLL_S)
+
+        threading.Thread(target=guard, daemon=True).start()
         # "running" is published before the start, so that a measurement that takes the lock
         # in between waits for the freeze instead of measuring beside the campaign.
         publish(name, "running")
@@ -200,6 +225,10 @@ def watch(name: str) -> int:
         busy_since: float | None = None
         while not stopping:
             heartbeat.touch()
+            if breached.is_set():
+                # Frozen or not: its memory is what the host needs back.
+                log(name, f"host memory available fell below --free {memfloor.show(floor)}")
+                return 1
             if not cgroup.exists():
                 ended = True
                 log(name, "campaign ended; `docker logs` keeps its output")
@@ -256,6 +285,9 @@ def start(args: argparse.Namespace) -> int:
     STATE.mkdir(exist_ok=True)
     if docker("ps", "-aq", "--filter", f"name=^{container}$").stdout.strip():
         sys.exit(f"autan-campaign: {container} already exists")
+    floor = memfloor.parse(args.free)
+    if floor is None:
+        sys.exit(f"autan-campaign: --free {args.free!r} is not a size such as 24G or 512M")
     command = args.command
     if not command:
         sys.exit("autan-campaign: no command after --")
@@ -275,7 +307,7 @@ def start(args: argparse.Namespace) -> int:
     # The watcher starts the container once the GPU lock is free, then freezes and thaws it.
     with (STATE / f"{args.name}.log").open("a") as errors:
         subprocess.Popen(
-            [sys.executable, __file__, "_watch", args.name],
+            [sys.executable, __file__, "_watch", args.name, str(floor)],
             start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=errors,
         )  # fmt: skip
@@ -323,6 +355,8 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("start", help="start a campaign")
     s.add_argument("name")
     s.add_argument("--cpus", type=float, default=12.0)
+    s.add_argument("--free", default=memfloor.DEFAULT,
+                   help="host memory to keep available, as 24G or 512M (0G for none)")  # fmt: skip
     s.add_argument("--image", default="autan-dev:local")
     s.add_argument("--dir", default=".", help="directory mounted at /work")
     s.set_defaults(func=start)
@@ -332,7 +366,8 @@ def main(argv: list[str] | None = None) -> int:
     k.set_defaults(func=stop_campaign)
     w = sub.add_parser("_watch", help=argparse.SUPPRESS)
     w.add_argument("name")
-    w.set_defaults(func=lambda a: watch(a.name))
+    w.add_argument("floor", type=int)
+    w.set_defaults(func=lambda a: watch(a.name, a.floor))
     argv = sys.argv[1:] if argv is None else argv
     # argparse.REMAINDER would also swallow the options before "--".
     split = argv.index("--") if "--" in argv else len(argv)

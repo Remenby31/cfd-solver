@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """autan-gpu-lock: run a command under the Spark GPU lock, bounded, and record who held it.
 
-    autan-gpu-lock -m WHY [-n] [-w WAIT_S] [-t HOLD_S] -- COMMAND...
+    autan-gpu-lock -m WHY [-n] [-w WAIT_S] [-t HOLD_S] [-f FLOOR] -- COMMAND...
 
 -m WHY     what the command is for (agent, task), written to the holders log; required
 -w WAIT_S  give up (exit 75) if the lock is not free after this long (default 3600)
@@ -10,12 +10,19 @@
            same records; the -t limit then counts from its start, its own lock wait included
 -t HOLD_S  hold the lock at most this long, 1 to 600 (default 600): the command's processes get
            TERM shortly before and KILL at the limit (exit 124)
+-f FLOOR   host memory to keep available, as 24G or 512M (default 24G, 0G for none): the
+           command does not start below it, and its processes get KILL as soon as MemAvailable
+           falls below it (exit 71); GB10's GPU allocates from host memory and a container's
+           memory limit does not bound device allocations (autan_memfloor.py)
 
-The command runs in its own session, without the lock's descriptor. A signal to the wrapper
+The command runs in its own session, without the lock's descriptor. A command that is itself
+`docker run` gets a --cidfile: its container lives outside the session, so the container is
+killed with `docker kill` before the session whenever the command is stopped, and any still
+running at the end; a `docker run` nested in a shell is not seen. A signal to the wrapper
 stops it the same way (exit 143); a command that cannot start exits 127. Before the lock is
-released, every process left in the session is killed and waited for, so no worker outlives the
-hold; one that starts its own session escapes this, and one that survives SIGKILL (stuck in the
-kernel) is recorded as a leftover and makes the wrapper exit 70. Every event is one line of
+released, every process left in the session, and every descendant of one even in a session of
+its own, is killed and waited for, so no worker outlives the hold; one that survives SIGKILL
+(stuck in the kernel) is recorded as a leftover and makes the wrapper exit 70. Every event is one line of
 holders.log next to the lock (tab-separated: UTC time, event, who, where, seconds, exit status,
 why, command), written with a single append. Do not nest autan-bench under it: autan-bench takes
 the lock itself. See docs/infra/bench.md.
@@ -32,8 +39,12 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
+
+sys.dont_write_bytecode = True  # installed in a shared, often read-only directory
+import autan_memfloor as memfloor
 
 LOCK = Path(os.environ.get("AUTAN_GPU_LOCK", "/home/admin/autan-gpu/gpu.lock"))
 LOG = LOCK.parent / "holders.log"
@@ -55,25 +66,31 @@ def seconds(text: str, low: int, high: int) -> int:
     return int(text)
 
 
-def parse(argv: list[str]) -> tuple[str, int, int, bool, list[str]]:
-    why, wait_s, hold_s, self_locking = "", 3600, MAX_HOLD_S, False
+def parse(argv: list[str]) -> tuple[str, int, int, int, bool, list[str]]:
+    why, wait_s, hold_s, floor, self_locking = "", 3600, MAX_HOLD_S, None, False
     while argv and argv[0] != "--":
         if argv[0] == "-n":
             self_locking, argv = True, argv[1:]
             continue
-        if len(argv) < 2 or argv[0] not in ("-m", "-w", "-t"):
+        if len(argv) < 2 or argv[0] not in ("-m", "-w", "-t", "-f"):
             usage(f"unexpected {argv[0]!r}")
         flag, value, argv = argv[0], argv[1], argv[2:]
         if flag == "-m":
             why = value
         elif flag == "-w":
             wait_s = seconds(value, 0, 10**6)
+        elif flag == "-f":
+            floor = memfloor.parse(value)
+            if floor is None:
+                usage(f"{value!r} is not a size such as 24G or 512M")
         else:
             hold_s = seconds(value, 1, MAX_HOLD_S)
     command = argv[1:]
     if not why or not command:
         usage("-m WHY and a command after -- are required")
-    return why, wait_s, hold_s, self_locking, command
+    if floor is None:
+        floor = memfloor.parse(memfloor.DEFAULT)
+    return why, wait_s, hold_s, floor, self_locking, command
 
 
 def field(text: str, limit: int) -> str:
@@ -141,29 +158,103 @@ def ci_waiting() -> bool:
     return _held(LOCK.parent / "main.lock")
 
 
-def session_members(sid: int) -> list[int]:
-    """Live processes of a session (zombies left by a non-reaping PID 1 hold nothing)."""
-    members = []
-    for proc_stat in Path("/proc").glob("[0-9]*/stat"):
+TREE_EVERY_S = 0.5
+
+
+class Tree:
+    """The command's processes: its session, and every descendant of a process ever seen in it,
+    so that a worker that starts its own session (autan-bench's gated binary) is still found.
+    Zombies left by a non-reaping PID 1 hold nothing and are not counted."""
+
+    def __init__(self, sid: int) -> None:
+        self.sid = sid
+        self.known: dict[int, bytes] = {}
+        self.at = 0.0
+
+    def scan(self) -> list[int]:
+        table = {}
+        for proc_stat in Path("/proc").glob("[0-9]*/stat"):
+            try:
+                # proc(5): state, ppid, pgrp, session ... starttime (22nd field).
+                fields = proc_stat.read_bytes().rpartition(b")")[2].split()
+                table[int(proc_stat.parent.name)] = (fields[0], int(fields[1]), int(fields[3]),
+                                                     fields[19])  # fmt: skip
+            except (OSError, IndexError, ValueError):
+                continue
+        members = {pid for pid, (_, _, sid, _) in table.items() if sid == self.sid}
+        members |= {
+            pid for pid, start in self.known.items() if table.get(pid, (0, 0, 0, b""))[3] == start
+        }
+        grew = True
+        while grew:
+            children = {pid for pid, (_, ppid, _, _) in table.items() if ppid in members}
+            grew = not children <= members
+            members |= children
+        self.known = {pid: table[pid][3] for pid in members}
+        self.at = time.monotonic()
+        return [pid for pid in members if table[pid][0] not in (b"Z", b"X")]
+
+    def track(self) -> None:
+        if time.monotonic() - self.at >= TREE_EVERY_S:
+            self.scan()
+
+    def kill(self, sig: int) -> None:
+        for pid in self.scan():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, sig)
+
+
+class Container:
+    """The container of a command that is `docker run`, which runs outside its session."""
+
+    def __init__(self) -> None:
+        self.cidfile: Path | None = None
+        self.id: str | None = None
+
+    def wrap(self, command: list[str]) -> list[str]:
+        if Path(command[0]).name != "docker" or command[1:2] != ["run"]:
+            return command
+        self.cidfile = Path(tempfile.mkdtemp(prefix="autan-gpu-lock-")) / "cid"
+        return [command[0], "run", "--cidfile", str(self.cidfile), *command[2:]]
+
+    def _cid(self) -> str | None:
+        if self.id is None and self.cidfile is not None:
+            with contextlib.suppress(OSError):
+                self.id = self.cidfile.read_text().strip() or None
+        return self.id
+
+    def running(self) -> bool:
+        cid = self._cid()
+        if cid is None:
+            return False
         try:
-            # proc(5): state, ppid, process group and session follow the command name.
-            fields = proc_stat.read_bytes().rpartition(b")")[2].split()
-        except OSError:
-            continue
-        if int(fields[3]) == sid and fields[0] not in (b"Z", b"X"):
-            members.append(int(proc_stat.parent.name))
-    return members
+            out = subprocess.run(["docker", "ps", "-q", "--no-trunc", "--filter", f"id={cid}"],
+                                 capture_output=True, text=True, timeout=20, check=False).stdout  # fmt: skip
+        except (OSError, subprocess.SubprocessError):
+            return True
+        return cid in out
 
+    def kill(self) -> None:
+        if self.cidfile is None:
+            return
+        if self._cid() is None:
+            sys.stderr.write("autan-gpu-lock: docker run has written no container id yet; "
+                             "its container cannot be stopped from here\n")  # fmt: skip
+            return
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["docker", "kill", self.id], capture_output=True, timeout=20, check=False
+            )
 
-def kill_session(sid: int, sig: int) -> None:
-    # The session, not the process group: a job-control shell puts workers in other groups.
-    for pid in session_members(sid):
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, sig)
+    def remove_cidfile(self) -> None:
+        if self.cidfile is not None:
+            self.cidfile.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                self.cidfile.parent.rmdir()
 
 
 def main() -> int:
-    why, wait_s, hold_s, self_locking, command = parse(sys.argv[1:])
+    why, wait_s, hold_s, floor, self_locking, command = parse(sys.argv[1:])
     log = Log(why, command)
     cancel = []
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
@@ -205,13 +296,19 @@ def main() -> int:
         if cancel:
             log.record("cancelled", 0, 143)
             return 143
+        if memfloor.below(floor):
+            log.record("memory", time.monotonic() - taken, 71)
+            sys.stderr.write(f"autan-gpu-lock: {memfloor.show(memfloor.available())} available, "
+                             f"below the -f floor of {memfloor.show(floor)}; not started\n")  # fmt: skip
+            return 71
+        container = Container()
         try:
-            proc = subprocess.Popen(command, start_new_session=True)
+            proc = subprocess.Popen(container.wrap(command), start_new_session=True)
         except OSError as err:
             log.record("failed", time.monotonic() - taken, 127)
             sys.stderr.write(f"autan-gpu-lock: cannot run {command[0]}: {err}\n")
             return 127
-        status, stop, leftover = supervise(proc, taken, hold_s, cancel)
+        status, stop, leftover, low = supervise(proc, taken, hold_s, floor, cancel, container)
         held = time.monotonic() - taken
         fcntl.flock(handle, fcntl.LOCK_UN)
 
@@ -225,23 +322,41 @@ def main() -> int:
     if stop == "killed":
         log.record("killed", held, 143)
         return 143
+    if stop == "memory":
+        log.record("memory", held, 71)
+        sys.stderr.write(f"autan-gpu-lock: host memory available fell to {memfloor.show(low)}, "
+                         f"below the -f floor of {memfloor.show(floor)}; the command was killed\n")  # fmt: skip
+        return 71
     log.record("release", held, status)
     return 70 if leftover else status
 
 
 def supervise(
-    proc: subprocess.Popen, taken: float, hold_s: int, cancel: list[int]
-) -> tuple[int, str | None, int]:
-    """Run the command's session to its end or its limit; returns its exit status, why it was
-    stopped, and how many of its processes outlived SIGKILL."""
-    sid = proc.pid
+    proc: subprocess.Popen, taken: float, hold_s: int, floor: int, cancel: list[int],
+    container: Container,
+) -> tuple[int, str | None, int, int | None]:  # fmt: skip
+    """Run the command's session to its end, its limit or the memory floor; returns its exit
+    status, why it was stopped, how many of its processes outlived SIGKILL, and the lowest
+    MemAvailable seen."""
+    # The session, not the process group: a job-control shell puts workers in other groups.
+    tree = Tree(proc.pid)
     grace = min(10.0, hold_s / 2)
     hard = taken + hold_s
     stop = None
     termed_at = None
+    low = None
     # The deadline is checked before the exit: a command noticed done after its limit overran.
     while True:
         now = time.monotonic()
+        free = memfloor.available() if floor else None
+        if free is not None:
+            low = free if low is None else min(low, free)
+        tree.track()
+        if stop != "memory" and floor and (free is None or free < floor):
+            # No TERM grace, even during another stop's: every second counts for the host.
+            stop = "memory"
+            container.kill()
+            tree.kill(signal.SIGKILL)
         if stop is None and cancel:
             stop = "killed"
         if stop is None and now >= hard - grace:
@@ -250,22 +365,27 @@ def supervise(
             break
         if stop is not None:
             if now >= hard or (termed_at is not None and now >= termed_at + grace):
-                kill_session(sid, signal.SIGKILL)
+                # The container first: once its docker client is gone, nothing stops it.
+                container.kill()
+                tree.kill(signal.SIGKILL)
             elif termed_at is None:
-                kill_session(sid, signal.SIGTERM)
+                tree.kill(signal.SIGTERM)
                 termed_at = now
             # A leader in uninterruptible sleep never exits: stop waiting for it.
             if now >= hard + CLEANUP_S:
                 break
         time.sleep(POLL_S)
-    # Workers the command left in its session would outlive the hold.
-    kill_session(sid, signal.SIGKILL)
+    # Workers the command left in its session, or its container, would outlive the hold.
+    if container.running():
+        container.kill()
+    tree.kill(signal.SIGKILL)
     end = time.monotonic() + CLEANUP_S
-    while session_members(sid) and time.monotonic() < end:
+    while (tree.scan() or container.running()) and time.monotonic() < end:
         time.sleep(POLL_S)
+    container.remove_cidfile()
     code = proc.returncode
     status = 128 - code if code is not None and code < 0 else (code if code is not None else 137)
-    return status, stop, len(session_members(sid))
+    return status, stop, len(tree.scan()) + container.running(), low
 
 
 if __name__ == "__main__":
