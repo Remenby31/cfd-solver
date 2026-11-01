@@ -2,7 +2,9 @@
 // solver inputs written by `autan prepare` (tests/data/runtime), edited per test.
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -456,18 +458,28 @@ void unsteady_through_pairs(Json& d, int steps) {
 
 }  // namespace
 
-TEST_CASE("a steady multigrid case with periodic pairs is refused before any directory exists",
+TEST_CASE("steady cases the steady solver cannot run are refused before any directory exists",
           "[euler]") {
   // The multigrid agglomerates one mesh's cells and takes no image ghosts: E0706 at
-  // `time.linear_solver`.
-  const auto doc = input("hybrid.solver-input.json", [&](Json& d) { periodic_box(d, "fp64"); });
+  // `time.linear_solver`. The steady solvers sum in local cell order: reproducibility "ranks" is
+  // E1109.
+  const bool periodic = GENERATE(true, false);
+  CAPTURE(periodic);
+  const auto doc = input("hybrid.solver-input.json", [&](Json& d) {
+    if (periodic) {
+      periodic_box(d, "fp64");
+    } else {
+      inviscid_along_x(d, "fp64");
+      d["reproducibility"] = "ranks";
+    }
+  });
   const auto out = run(doc);
   INFO(out.err);
   CHECK(out.status == ExitStatus::invalid_input);
   CHECK(!fs::exists(out.runs));
   const auto diagnostic = Json::parse(out.err.substr(0, out.err.find('\n')));
-  CHECK(diagnostic["code"] == "E0706");
-  CHECK(diagnostic["location"]["path"] == "time.linear_solver");
+  CHECK(diagnostic["code"] == (periodic ? "E0706" : "E1109"));
+  CHECK(diagnostic["location"]["path"] == (periodic ? "time.linear_solver" : "reproducibility"));
 }
 
 TEST_CASE("a uniform flow through periodic pairs stays uniform", "[euler]") {
@@ -614,14 +626,17 @@ fs::path run_on_ranks(const Json& doc, int ranks, int expected_status = 0,
 }  // namespace
 
 TEST_CASE("several ranks give the one-rank solution to round-off", "[euler][mpi]") {
-  // runtime.md, Ranks: Euler on N ranks equals one rank to round-off (faces summed in local
-  // order, issue #199); at a fixed rank count, runs repeat bit for bit. Two zones at different
-  // states on the hybrid mesh (farfield around), or a flow through the periodic box's pairs.
+  // runtime.md, Ranks: Euler on N ranks equals one rank to round-off under reproducibility
+  // "run" (faces summed in local order), and bit for bit under "ranks"; at a fixed rank count,
+  // runs repeat bit for bit. Two zones at different states on the hybrid mesh (farfield
+  // around), or a flow through the periodic box's pairs.
   const char* precision = GENERATE("fp64", "fp32+acc64");
   const bool periodic = GENERATE(false, true);
   const int ranks = GENERATE(2, 4);
-  CAPTURE(precision, periodic, ranks);
+  const char* reproducibility = GENERATE("run", "ranks");
+  CAPTURE(precision, periodic, ranks, reproducibility);
   const auto doc = input("hybrid.solver-input.json", [&](Json& d) {
+    d["reproducibility"] = reproducibility;
     if (periodic) {
       // Through both pairs and into the slip wall zmin, so that the flow evolves.
       periodic_box(d, precision);
@@ -682,10 +697,27 @@ TEST_CASE("several ranks give the one-rank solution to round-off", "[euler][mpi]
     const double scale = std::string(name).starts_with("Velocity") ? speed : magnitude(a);
     worst_field = std::max(worst_field, diff / (scale * eps));
   }
-  // Measured at most 7.5 eps on norms and 11.3 eps on fields over these 12 steps (fp64, 4 ranks).
+  // Under "run": measured at most 7.5 eps on norms and 11.3 eps on fields over these 12 steps
+  // (fp64, 4 ranks).
   INFO("norms " << worst_norm << " eps, fields " << worst_field << " eps");
-  CHECK(worst_norm <= 256.0);
-  CHECK(worst_field <= 256.0);
+  if (std::string(reproducibility) == "ranks") {
+    CHECK(read(many / "history.jsonl") == read(one.run / "history.jsonl"));
+    // Bit patterns, so that a signed zero or a NaN cannot pass for an equal value.
+    for (const char* name : {"Density", "VelocityX", "VelocityY", "VelocityZ", "Pressure"}) {
+      INFO(name);
+      const auto a = field(one.run, name), b = field(many, name);
+      REQUIRE(std::ranges::all_of(a, [](double x) { return std::isfinite(x); }));
+      std::vector<std::uint64_t> bits_one(a.size()), bits_many(b.size());
+      std::ranges::transform(a, bits_one.begin(),
+                             [](double x) { return std::bit_cast<std::uint64_t>(x); });
+      std::ranges::transform(b, bits_many.begin(),
+                             [](double x) { return std::bit_cast<std::uint64_t>(x); });
+      CHECK(bits_one == bits_many);
+    }
+  } else {
+    CHECK(worst_norm <= 256.0);
+    CHECK(worst_field <= 256.0);
+  }
   // A fixed rank count repeats bit for bit.
   const fs::path again = run_on_ranks(doc, ranks);
   CHECK(read(again / "history.jsonl") == read(many / "history.jsonl"));
@@ -1417,12 +1449,20 @@ TEST_CASE("on a device, a flow through periodic pairs follows the host's", "[eul
   CHECK(worst <= 256.0);
 }
 
-TEST_CASE("on a device, a point vortex is refused before any directory exists", "[euler][gpu]") {
+TEST_CASE("on a device, what the device steps cannot honour is refused before any directory",
+          "[euler][gpu]") {
   // The device steps take no circulation from the lift (the host's steady step measures it), so a
   // point vortex on a device would keep its initial circulation: E0706, not a silent mismatch.
+  // They sum in local order, so reproducibility "ranks" is E1109.
+  const bool vortex = GENERATE(true, false);
+  CAPTURE(vortex);
   const auto doc = input("hybrid.solver-input.json", [&](Json& d) {
     inviscid_along_x(d, "fp64");
     on_device(d);
+    if (!vortex) {
+      d["reproducibility"] = "ranks";
+      return;
+    }
     for (auto& b : d["boundaries"]) {
       if (b["zone"] == "zmin") {
         b["kind"] = "slip";
@@ -1438,8 +1478,9 @@ TEST_CASE("on a device, a point vortex is refused before any directory exists", 
   CHECK(out.status == ExitStatus::invalid_input);
   CHECK(!fs::exists(out.runs));
   const auto diagnostic = Json::parse(out.err.substr(0, out.err.find('\n')));
-  CHECK(diagnostic["code"] == "E0706");
-  CHECK(diagnostic["location"]["path"].get<std::string>().ends_with(".point_vortex"));
+  CHECK(diagnostic["code"] == (vortex ? "E0706" : "E1109"));
+  CHECK(diagnostic["location"]["path"].get<std::string>().ends_with(vortex ? ".point_vortex"
+                                                                           : "reproducibility"));
 }
 
 TEST_CASE("on a device, a diverged run names the cell whose stored state is not physical",

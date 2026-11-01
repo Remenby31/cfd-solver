@@ -41,6 +41,11 @@ struct Euler<P>::Impl {
   std::vector<Gr> grad, zero_grad;
   ek::Data<P> d{};
   GhostFill* ghosts = nullptr;
+  // Under global keys: each cell's faces in global order, their twins and the faces that run
+  // against their global orientation; face loops then gather (no scatter order).
+  kernels::GlobalOrder order;
+  std::vector<std::uint8_t> reversed;
+  bool gather = false;
 
   // Fills the ghost values of `n` components of an array laid out c * n_cells + i.
   // The exchange takes at most 16 components a call.
@@ -84,13 +89,25 @@ struct Euler<P>::Impl {
     to = kernels::converted<T>(from);
   }
 
-  Impl(const Mesh& mesh, const Geometry& geometry, Gas gas, Scheme s) : scheme(s) {
-    const auto packed = kernels::pack_geometry(mesh, geometry);
+  Impl(const Mesh& mesh, const Geometry& geometry, Gas gas, Scheme s,
+       const kernels::GlobalKeys* keys)
+      : scheme(s) {
+    const auto packed = kernels::pack_geometry(mesh, geometry, keys);
     topo = kernels::topology(mesh.view());
     stencil =
         kernels::cell_stencil(mesh, packed,
                               s.gradient == GradientStencil::vertex ? kernels::StencilKind::vertex
-                                                                    : kernels::StencilKind::face2);
+                                                                    : kernels::StencilKind::face2,
+                              keys);
+    if (keys != nullptr) {
+      order = kernels::global_order(mesh, *keys);
+      reversed.assign(keys->reversed.begin(), keys->reversed.end());
+      topo.cell_faces = order.cell_faces.data();
+      topo.incidence_twin = order.twin.data();
+      topo.face_reversed = reversed.data();
+      topo.rank_independent = true;
+      gather = true;
+    }
     topo.n_stencil = static_cast<kernels::offset_t>(stencil.entries.size());
     topo.stencil_offsets = stencil.offsets.data();
     topo.stencil = stencil.entries.data();
@@ -228,19 +245,29 @@ struct Euler<P>::Impl {
     d.stencil_lsq_weight = stencil_lsq_weight.data();
   }
 
+  // A face or boundary loop: its gather under global keys, else its scatter.
+  template <class Loop>
+  void run(Loop loop) const {
+    if (gather) {
+      loop(kernels::Strategy::store_gather);
+    } else {
+      loop();
+    }
+  }
+
   void faces() {
     switch (scheme.flux) {
       case Flux::roe:
-        ek::cpu::roe_faces(d);
-        ek::cpu::roe_boundaries(d);
+        run([&](auto... strategy) { ek::cpu::roe_faces(d, strategy...); });
+        run([&](auto... strategy) { ek::cpu::roe_boundaries(d, strategy...); });
         break;
       case Flux::hllc:
-        ek::cpu::hllc_faces(d);
-        ek::cpu::hllc_boundaries(d);
+        run([&](auto... strategy) { ek::cpu::hllc_faces(d, strategy...); });
+        run([&](auto... strategy) { ek::cpu::hllc_boundaries(d, strategy...); });
         break;
       case Flux::ausm_up:
-        ek::cpu::ausm_faces(d);
-        ek::cpu::ausm_boundaries(d);
+        run([&](auto... strategy) { ek::cpu::ausm_faces(d, strategy...); });
+        run([&](auto... strategy) { ek::cpu::ausm_boundaries(d, strategy...); });
         break;
     }
   }
@@ -248,16 +275,16 @@ struct Euler<P>::Impl {
   void faces_jacobian() {
     switch (scheme.flux) {
       case Flux::roe:
-        ek::cpu::roe_faces_jacobian(d);
-        ek::cpu::roe_boundaries_jacobian(d);
+        run([&](auto... strategy) { ek::cpu::roe_faces_jacobian(d, strategy...); });
+        run([&](auto... strategy) { ek::cpu::roe_boundaries_jacobian(d, strategy...); });
         break;
       case Flux::hllc:
-        ek::cpu::hllc_faces_jacobian(d);
-        ek::cpu::hllc_boundaries_jacobian(d);
+        run([&](auto... strategy) { ek::cpu::hllc_faces_jacobian(d, strategy...); });
+        run([&](auto... strategy) { ek::cpu::hllc_boundaries_jacobian(d, strategy...); });
         break;
       case Flux::ausm_up:
-        ek::cpu::ausm_faces_jacobian(d);
-        ek::cpu::ausm_boundaries_jacobian(d);
+        run([&](auto... strategy) { ek::cpu::ausm_faces_jacobian(d, strategy...); });
+        run([&](auto... strategy) { ek::cpu::ausm_boundaries_jacobian(d, strategy...); });
         break;
     }
   }
@@ -265,24 +292,25 @@ struct Euler<P>::Impl {
   void faces_tangent() {
     switch (scheme.flux) {
       case Flux::roe:
-        ek::cpu::roe_faces_tangent(d);
-        ek::cpu::roe_boundaries_tangent(d);
+        run([&](auto... strategy) { ek::cpu::roe_faces_tangent(d, strategy...); });
+        run([&](auto... strategy) { ek::cpu::roe_boundaries_tangent(d, strategy...); });
         break;
       case Flux::hllc:
-        ek::cpu::hllc_faces_tangent(d);
-        ek::cpu::hllc_boundaries_tangent(d);
+        run([&](auto... strategy) { ek::cpu::hllc_faces_tangent(d, strategy...); });
+        run([&](auto... strategy) { ek::cpu::hllc_boundaries_tangent(d, strategy...); });
         break;
       case Flux::ausm_up:
-        ek::cpu::ausm_faces_tangent(d);
-        ek::cpu::ausm_boundaries_tangent(d);
+        run([&](auto... strategy) { ek::cpu::ausm_faces_tangent(d, strategy...); });
+        run([&](auto... strategy) { ek::cpu::ausm_boundaries_tangent(d, strategy...); });
         break;
     }
   }
 };
 
 template <class P>
-Euler<P>::Euler(const Mesh& mesh, const Geometry& geometry, Gas gas, Scheme scheme)
-    : impl_(std::make_unique<Impl>(mesh, geometry, gas, scheme)) {}
+Euler<P>::Euler(const Mesh& mesh, const Geometry& geometry, Gas gas, Scheme scheme,
+                const kernels::GlobalKeys* keys)
+    : impl_(std::make_unique<Impl>(mesh, geometry, gas, scheme, keys)) {}
 
 template <class P>
 Euler<P>::~Euler() = default;
@@ -421,9 +449,16 @@ void Euler<P>::assemble(std::span<const double> shift, BlockMatrix& a) const {
       }
     }
   };
+  // The face loops evaluate each face in its global orientation (Topology::face_reversed):
+  // face_jac holds dF/dW of its global left (block 0) and right (block 1) cells, with
+  // R_left += F, R_right -= F. The blocks are placed in the local orientation of BlockMatrix.
+  auto left = [&](std::size_t f) {
+    const bool rev = m.topo.face_reversed != nullptr && m.topo.face_reversed[f] != 0;
+    return static_cast<std::size_t>(rev ? m.topo.neighbour[f] : m.topo.owner[f]);
+  };
   a.zero();
-  // Each diagonal block gathers its cell's faces in Topology::cell_faces order, as the device
-  // gather does, so that both sum in the same order (R_o += F, R_n -= F).
+  // Each diagonal block gathers its cell's faces in Topology::cell_faces order (global order
+  // under global keys), as the device gather does, so that both sum in the same order.
   for (std::size_t c = 0; c < nc; ++c) {
     double* dg = a.diagonal(c);
     for (std::size_t i = 0; i < 5; ++i) dg[6 * i] += shift[c];
@@ -432,7 +467,7 @@ void Euler<P>::assemble(std::span<const double> shift, BlockMatrix& a) const {
       const auto f = static_cast<std::size_t>(m.topo.cell_faces[k]);
       if (f >= ni) {
         add_product(dg, block(m.bnd_jac, nf, f, 0), dc, 1.0);
-      } else if (static_cast<std::size_t>(m.topo.owner[f]) == c) {
+      } else if (left(f) == c) {
         add_product(dg, block(m.face_jac, nf, f, 0), dc, 1.0);
       } else {
         add_product(dg, block(m.face_jac, nf, f, 1), dc, -1.0);
@@ -442,8 +477,12 @@ void Euler<P>::assemble(std::span<const double> shift, BlockMatrix& a) const {
   for (std::size_t f = 0; f < ni; ++f) {
     const auto o = static_cast<std::size_t>(m.topo.owner[f]);
     const auto n = static_cast<std::size_t>(m.topo.neighbour[f]);
-    add_product(a.upper(f), block(m.face_jac, nf, f, 1), block(m.dwdu, nc, n, 0), 1.0);
-    add_product(a.lower(f), block(m.face_jac, nf, f, 0), block(m.dwdu, nc, o, 0), -1.0);
+    // A(left, right) = +J_right D_right and A(right, left) = -J_left D_left.
+    const bool rev = left(f) != o;
+    add_product(rev ? a.lower(f) : a.upper(f), block(m.face_jac, nf, f, 1),
+                block(m.dwdu, nc, rev ? o : n, 0), 1.0);
+    add_product(rev ? a.upper(f) : a.lower(f), block(m.face_jac, nf, f, 0),
+                block(m.dwdu, nc, rev ? n : o, 0), -1.0);
   }
 }
 

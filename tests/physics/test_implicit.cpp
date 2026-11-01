@@ -1,19 +1,25 @@
 // The approximate Jacobian of the Euler residual and its block Gauss-Seidel solver.
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <random>
 #include <span>
 #include <vector>
 
+#include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/generators/catch_generators_range.hpp>
 
 #include "autan/core/geometry.hpp"
+#include "autan/core/renumber.hpp"
 #include "autan/io/read_mesh.hpp"
+#include "autan/kernels/geometry.hpp"
 #include "autan/kernels/runtime.hpp"
 #include "autan/partition/partition.hpp"
 #include "autan/physics/block_matrix.hpp"
@@ -266,4 +272,147 @@ TEST_CASE("multicolour block Gauss-Seidel solves a block diagonally dominant sys
     ref = std::max(ref, std::abs(x_exact[i]));
   }
   CHECK(err <= 1e-12 * ref);
+}
+
+TEMPLATE_TEST_CASE("under global keys, renumbered cells have the residual and Jacobian bit for bit",
+                   "[implicit]", autan::kernels::fp64, autan::kernels::fp32_acc64) {
+  // solver-input.md, reproducibility "ranks": what a cell sums must not depend on how the mesh is
+  // numbered. Renumbering the cells (reverse Cuthill-McKee) re-sorts the faces and flips some,
+  // as a partition does; with the global keys of the original mesh the second-order residual,
+  // limiter on, and every block of the Jacobian must keep their bits.
+  using P = TestType;
+  const char* file = GENERATE(from_range(meshes));
+  INFO(file);
+  const auto a = autan::io::read_mesh(mesh_dir / file);
+  const auto ga = autan::compute_geometry(a);
+  const auto b = autan::renumber_cells(a, autan::rcm_order(a));
+  const auto nc = static_cast<std::size_t>(a.n_cells());
+  const auto nf = static_cast<std::size_t>(a.n_faces());
+  const auto ni = static_cast<std::size_t>(a.n_interior_faces());
+  const auto nb = nf - ni;
+  // The face of `a` each face of `b` is, by its nodes, and whether it runs the other way.
+  auto nodes = [](const autan::Mesh& m, std::size_t f) {
+    const auto n = m.face_nodes(static_cast<autan::index_t>(f));
+    std::vector<autan::index_t> v(n.begin(), n.end());
+    std::ranges::sort(v);
+    return v;
+  };
+  std::map<std::vector<autan::index_t>, std::size_t> face_of;
+  for (std::size_t f = 0; f < nf; ++f) face_of[nodes(a, f)] = f;
+  const auto gid = b.cell_global_id();
+  auto cell = [&](std::size_t c) { return static_cast<std::size_t>(gid[c]); };
+  std::vector<std::int64_t> face_a(nf), face_id(nf);
+  std::vector<std::uint8_t> reversed(nf, 0), not_reversed(nf, 0);
+  std::size_t n_reversed = 0;
+  for (std::size_t f = 0; f < nf; ++f) {
+    face_id[f] = static_cast<std::int64_t>(f);
+    const auto fa = face_of.at(nodes(b, f));
+    face_a[f] = static_cast<std::int64_t>(fa);
+    reversed[f] = static_cast<std::uint8_t>(cell(static_cast<std::size_t>(b.owner()[f])) !=
+                                            static_cast<std::size_t>(a.owner()[fa]));
+    n_reversed += reversed[f];
+  }
+  REQUIRE(n_reversed > 0);
+  // The geometry of `a`, carried over as a partition carries it: area vectors negated where the
+  // face runs the other way.
+  autan::Geometry gb = autan::compute_geometry(b);
+  for (std::size_t f = 0; f < nf; ++f) {
+    const auto fa = static_cast<std::size_t>(face_a[f]);
+    const double sign = reversed[f] != 0 ? -1.0 : 1.0;
+    gb.face_area_x[f] = sign * ga.face_area_x[fa];
+    gb.face_area_y[f] = sign * ga.face_area_y[fa];
+    gb.face_area_z[f] = sign * ga.face_area_z[fa];
+    gb.face_area[f] = ga.face_area[fa];
+    gb.face_centroid_x[f] = ga.face_centroid_x[fa];
+    gb.face_centroid_y[f] = ga.face_centroid_y[fa];
+    gb.face_centroid_z[f] = ga.face_centroid_z[fa];
+  }
+  for (std::size_t c = 0; c < nc; ++c) {
+    gb.cell_volume[c] = ga.cell_volume[cell(c)];
+    gb.cell_centroid_x[c] = ga.cell_centroid_x[cell(c)];
+    gb.cell_centroid_y[c] = ga.cell_centroid_y[cell(c)];
+    gb.cell_centroid_z[c] = ga.cell_centroid_z[cell(c)];
+  }
+  const autan::kernels::GlobalKeys keys_a{
+      .cell = a.cell_global_id(), .face = face_id, .reversed = not_reversed, .shift = {}};
+  const autan::kernels::GlobalKeys keys_b{
+      .cell = gid, .face = face_a, .reversed = reversed, .shift = {}};
+
+  const double sound = std::sqrt(1.4 * 1e5 / 1.2);
+  const std::array<double, 5> w = {1.2, 0.6 * sound, 0.2 * sound, -0.1 * sound, 1e5};
+  const std::array<BoundaryKind, 4> kinds = {BoundaryKind::farfield, BoundaryKind::slip,
+                                             BoundaryKind::outlet, BoundaryKind::state};
+  std::vector<BoundaryKind> kind_a(nb), kind_b(nb);
+  std::vector<double> data_a(5 * nb), data_b(5 * nb);
+  for (std::size_t k = 0; k < nb; ++k) {
+    kind_a[k] = kinds[k % kinds.size()];
+    for (std::size_t j = 0; j < 5; ++j) data_a[j * nb + k] = w[j];
+  }
+  for (std::size_t f = ni; f < nf; ++f) {
+    const auto k = static_cast<std::size_t>(face_a[f]) - ni;
+    kind_b[f - ni] = kind_a[k];
+    for (std::size_t j = 0; j < 5; ++j) data_b[j * nb + f - ni] = data_a[j * nb + k];
+  }
+  autan::physics::Scheme s;
+  s.flux = Flux::roe;
+  s.second_order = true;
+  s.limiter = true;
+  s.reference = conserved(1.1, {10.0, 5.0, 0.0}, 0.95e5);
+  Euler<P> ea(a, ga, {1.4, 287.0}, s, &keys_a);
+  Euler<P> eb(b, gb, {1.4, 287.0}, s, &keys_b);
+  ea.set_boundary(kind_a, data_a);
+  eb.set_boundary(kind_b, data_b);
+  const auto uc = conserved(w[0], {w[1], w[2], w[3]}, w[4]);
+  std::vector<double> ua(5 * nc), ub(5 * nc), shift_a(nc), shift_b(nc);
+  for (std::size_t c = 0; c < nc; ++c) {
+    const double x = ga.cell_centroid_x[c], y = ga.cell_centroid_y[c], z = ga.cell_centroid_z[c];
+    for (std::size_t k = 0; k < 5; ++k) {
+      ua[k * nc + c] =
+          uc[k] * (1.0 + 0.1 * std::sin(3.0 * x + static_cast<double>(k)) * std::cos(2.0 * y - z));
+    }
+    shift_a[c] = 1.0 + x;
+  }
+  for (std::size_t c = 0; c < nc; ++c) {
+    for (std::size_t k = 0; k < 5; ++k) ub[k * nc + c] = ua[k * nc + cell(c)];
+    shift_b[c] = shift_a[cell(c)];
+  }
+  std::vector<typename P::state> sa(5 * nc), sb(5 * nc);
+  std::vector<typename P::residual> ra(5 * nc), rb(5 * nc);
+  ea.state(ua, sa);
+  eb.state(ub, sb);
+  ea.residual_and_jacobian(sa, ra);
+  eb.residual_and_jacobian(sb, rb);
+  // Bit patterns, so that a signed zero or a NaN cannot pass for an equal value.
+  auto bits_differ = [](auto x, auto y) {
+    static_assert(sizeof(x) == sizeof(y));
+    return std::memcmp(&x, &y, sizeof(x)) != 0;
+  };
+  REQUIRE(std::ranges::all_of(ra, [](auto x) { return std::isfinite(static_cast<double>(x)); }));
+  std::size_t residual_differs = 0;
+  for (std::size_t c = 0; c < nc; ++c) {
+    for (std::size_t k = 0; k < 5; ++k) {
+      residual_differs += bits_differ(rb[k * nc + c], ra[k * nc + cell(c)]);
+    }
+  }
+  CHECK(residual_differs == 0);
+  BlockMatrix ma(a), mb(b);
+  ea.assemble(shift_a, ma);
+  eb.assemble(shift_b, mb);
+  REQUIRE(std::ranges::all_of(ma.diagonals(), [](double x) { return std::isfinite(x); }));
+  REQUIRE(std::ranges::all_of(ma.uppers(), [](double x) { return std::isfinite(x); }));
+  REQUIRE(std::ranges::all_of(ma.lowers(), [](double x) { return std::isfinite(x); }));
+  auto same = [](const double* x, const double* y) {
+    return std::memcmp(x, y, 25 * sizeof(double)) == 0;
+  };
+  std::size_t blocks_differ = 0;
+  for (std::size_t c = 0; c < nc; ++c) {
+    blocks_differ += !same(mb.diagonal(c), ma.diagonal(cell(c)));
+  }
+  // A(owner, neighbour) of `b` is upper or lower of `a`, as `a` orients the face.
+  for (std::size_t f = 0; f < ni; ++f) {
+    const auto fa = static_cast<std::size_t>(face_a[f]);
+    blocks_differ += !same(mb.upper(f), reversed[f] != 0 ? ma.lower(fa) : ma.upper(fa));
+    blocks_differ += !same(mb.lower(f), reversed[f] != 0 ? ma.upper(fa) : ma.lower(fa));
+  }
+  CHECK(blocks_differ == 0);
 }
