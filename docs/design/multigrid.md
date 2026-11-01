@@ -38,7 +38,7 @@ Every loop runs in a fixed order and every choice breaks ties by index, so a run
 
 ## GPU
 
-The multigrid runs on the host, as the whole implicit step today. The port (#163) follows the device assembly of the Jacobian: BSR products and fixed-order dot products from the kernel generator, Galerkin products, transfers and the line smoother written by hand in `solvers/` as gathers over precomputed lists, one line per thread within a colour.
+The multigrid runs on the host. Its device port (#163) is designed in [multigrid-gpu.md](multigrid-gpu.md).
 
 ## Verification
 
